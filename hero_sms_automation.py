@@ -958,9 +958,10 @@ def extract_phone_number(page: Page, selector: str, previous_number: str = "") -
 
 
 def normalize_phone(value: str) -> str:
-    value = value.strip()
-    value = re.sub(r"\s+", " ", value)
-    return value
+    if not value:
+        return ""
+    # Strip all non-digit characters (+, spaces, parentheses, dashes)
+    return "".join([c for c in value if c.isdigit()])
 
 
 def human_type(element, text: str):
