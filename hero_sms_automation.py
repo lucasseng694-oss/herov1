@@ -909,15 +909,15 @@ def extract_phone_number(page: Page, selector: str, previous_number: str = "") -
     max_retries = 8 # increased retries for slow API
     retry_count = 0
     
+    table_number = ""
     while retry_count < max_retries:
         try:
             # Wait for table to be visible
-            # Use tbody tr:first-child to get the first data row (latest number at top)
-            # This skips the header row properly
-            table_row = page.locator("tbody tr:first-child td:first-child").first
+            # Match first data cell in tbody, or fallback to first table cell/card
+            table_row = page.locator("tbody tr:first-child td:first-child, table tr:nth-child(2) td:first-child, .purchases-table td:first-child, td[data-title*='number']").first
             
             # Get the text
-            table_number = table_row.inner_text(timeout=10_000).strip()
+            table_number = table_row.inner_text(timeout=5_000).strip()
             
             print(f"Attempt {retry_count + 1}: Extracted text: '{table_number}'")
             
@@ -942,11 +942,13 @@ def extract_phone_number(page: Page, selector: str, previous_number: str = "") -
             print(f"Waiting 4 seconds before next attempt...")
             time.sleep(4)
             # Hero SMS sometimes gets stuck on "The list is empty." unless refreshed
-            # Let's reload earlier if we see this, or after a few retries anyway
-            if "The list is empty" in table_number or retry_count == 3 or retry_count == 6:
+            if "The list is empty" in table_number or retry_count == 2 or retry_count == 5:
                 print("Reloading page to force table refresh...")
-                page.reload(wait_until="domcontentloaded")
-                time.sleep(4)
+                try:
+                    page.reload(wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                time.sleep(3)
     
     # If we still don't have a number, raise error
     raise RuntimeError("Could not extract a valid NEW phone number from the Hero SMS purchases table.")
