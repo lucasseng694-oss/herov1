@@ -1,0 +1,27 @@
+# Virtual Environment (huge binaries - auto-rebuilt by run.bat)
+.venv/
+venv/
+ENV/
+
+# Chrome User Profiles & Local Storage (huge folders)
+chrome_profiles/
+chrome_profiles_fb/
+chrome_profiles_hero/
+
+# Accidental nested empty repository
+hero-sms/
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs & Temporary Files
+*.log
+*.tmp
+*.db
+
+# Private local data — never commit or publish
+config.json
+recovered_accounts.txt
+recovered_stats.json
