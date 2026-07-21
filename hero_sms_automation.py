@@ -912,22 +912,25 @@ def extract_phone_number(page: Page, selector: str, previous_number: str = "") -
     table_number = ""
     while retry_count < max_retries:
         try:
-            # Wait for table to be visible
-            # Match first data cell in tbody, or fallback to first table cell/card
+            # 1. Try Desktop Table layout
             table_row = page.locator("tbody tr:first-child td:first-child, table tr:nth-child(2) td:first-child, .purchases-table td:first-child, td[data-title*='number']").first
+            if table_row.is_visible(timeout=1500):
+                table_number = table_row.inner_text(timeout=2000).strip()
+            else:
+                # 2. Fallback to Responsive Card layout (extracting text from the top card / body)
+                body_text = page.locator("body").inner_text(timeout=2000)
+                matches = re.findall(r"\+\d[\d\s\(\)\-]{7,}\d", body_text)
+                if matches:
+                    table_number = matches[0]
             
-            # Get the text
-            table_number = table_row.inner_text(timeout=5_000).strip()
+            print(f"Attempt {retry_count + 1}: Extracted phone text: '{table_number}'")
             
-            print(f"Attempt {retry_count + 1}: Extracted text: '{table_number}'")
-            
-            # Check if it's a valid phone number (should have + and digits)
+            # Check if it's a valid phone number
             if table_number and len(table_number) > 5 and ('+' in table_number or any(c.isdigit() for c in table_number)):
                 normalized = normalize_phone(table_number)
                 
-                # Check if it's the exact same number as before we clicked buy
                 if previous_number and normalized == previous_number:
-                    print(f"⚠️ Still seeing the previous number '{normalized}'. API is slow. Waiting for new one...")
+                    print(f"⚠️ Still seeing the previous number '{normalized}'. Waiting for new one...")
                 else:
                     print(f"✅ Found valid NEW number: {normalized}")
                     return normalized
@@ -935,7 +938,7 @@ def extract_phone_number(page: Page, selector: str, previous_number: str = "") -
                 print(f"❌ Invalid or empty number: '{table_number}'.")
                 
         except Exception as e:
-            print(f"Error reading table: {e}")
+            print(f"Error reading phone number: {e}")
         
         retry_count += 1
         if retry_count < max_retries:
@@ -1065,11 +1068,15 @@ def wait_for_sms_code(page: Page, fb_page: Page = None, timeout_sec: int = 180) 
                 pass
 
         try:
-            row = page.locator("tbody tr:first-child").first
-            text = row.inner_text(timeout=5000)
+            # Read text from table row OR card layout OR body text
+            row = page.locator("tbody tr:first-child, div[class*='card']").first
+            if row.is_visible(timeout=1000):
+                text = row.inner_text(timeout=2000)
+            else:
+                text = page.locator("body").inner_text(timeout=2000)
             
-            if "SMS Code:" in text:
-                match = re.search(r"SMS Code:\s*(\d+)", text, re.I)
+            if "SMS Code:" in text or "code" in text.lower():
+                match = re.search(r"SMS Code:\s*(\d{5,8})", text, re.I) or re.search(r"code:?\s*(\d{5,8})", text, re.I)
                 if match:
                     code = match.group(1)
                     print(f"✅ Received SMS Code: {code}")
