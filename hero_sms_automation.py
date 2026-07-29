@@ -2064,21 +2064,21 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                             href = p_item.get_attribute("href") or ""
                             text = p_item.inner_text().strip()
                             
-                             is_lang_link = any(lang in text for lang in ["English", "Português", "Español", "Français", "Italiano", "Deutsch", "More languages", "Idiomas"])
-                             is_back_btn = any(keyword in text.lower() for keyword in [
-                                 "back", "voltar", "regresar", "not you", "não é você", "no eres tú",
-                                 "search by", "procurar por", "buscar por", "find your", "create account", 
-                                 "criar conta", "crear cuenta", "cancel", "cancelar", "try again", "tente de novo",
-                                 "choose your account", "escolha a sua conta", "seleciona tu cuenta",
-                                 "confirm your account", "confirmar sua conta", "confirmar tu cuenta",
-                                 "sign up", "cadastre-se", "registrarse", "log in", "entrar", "iniciar sessão",
-                                 "sign in", "about", "sobre", "privacy", "privacidade", "terms", "termos", "cookies"
-                             ]) or text.strip() in ["<", ">", ""] or len(text) > 40
-                             
-                             if not is_lang_link and not is_back_btn and len(text) > 0:
-                                 valid_profiles.append(p_item)
-                     except Exception:
-                         pass
+                            is_lang_link = any(lang in text for lang in ["English", "Português", "Español", "Français", "Italiano", "Deutsch", "More languages", "Idiomas"])
+                            is_back_btn = any(keyword in text.lower() for keyword in [
+                                "back", "voltar", "regresar", "not you", "não é você", "no eres tú",
+                                "search by", "procurar por", "buscar por", "find your", "create account", 
+                                "criar conta", "crear cuenta", "cancel", "cancelar", "try again", "tente de novo",
+                                "choose your account", "escolha a sua conta", "seleciona tu cuenta",
+                                "confirm your account", "confirmar sua conta", "confirmar tu cuenta",
+                                "sign up", "cadastre-se", "registrarse", "log in", "entrar", "iniciar sessão",
+                                "sign in", "about", "sobre", "privacy", "privacidade", "terms", "termos", "cookies"
+                            ]) or text.strip() in ["<", ">", ""] or len(text) > 40
+                            
+                            if not is_lang_link and not is_back_btn and len(text) > 0:
+                                valid_profiles.append(p_item)
+                    except Exception:
+                        pass
                 
                 if len(valid_profiles) >= 1:
                     print(f"🎯 Found {len(valid_profiles)} matching profile options. Clicking the first one: '{valid_profiles[0].inner_text().strip().replace(chr(10), ' ')}'...")
