@@ -2207,12 +2207,15 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                     for opt in options:
                         try:
                             text = opt.inner_text().strip()
-                            # Prioritize "SMS" delivery options and ignore WhatsApp options
+                            if not text:
+                                continue
+                                
+                            # Prioritize "SMS" delivery options and ignore WhatsApp/Password options
                             is_sms_opt = any(keyword in text.lower() for keyword in ["sms", "torpedos", "mensagem de texto", "mensaje de texto", "message de texto", "text message", "torpedo"])
                             is_wa_opt = "whatsapp" in text.lower() or "whats" in text.lower()
+                            is_password_opt = "password" in text.lower() or "senha" in text.lower() or "sandi" in text.lower() or "contraseña" in text.lower()
                             
-                            # Language-agnostic digit-matching check
-                            if 5 < len(text) < 150 and is_sms_opt and not is_wa_opt:
+                            if is_sms_opt and not is_wa_opt and not is_password_opt:
                                 # Extract phone preview line to prevent extra digits (e.g. "1 SMS left") from corrupting the check
                                 phone_line = None
                                 for line in text.split("\n"):
@@ -2224,7 +2227,18 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                                     phone_line = text
                                     
                                 digits_in_text = ''.join([c for c in phone_line if c.isdigit()])
+                                
+                                is_match = False
+                                # 1. If digits match our purchased number last two, it's a match
                                 if digits_in_text and digits_in_text.endswith(last_two):
+                                    is_match = True
+                                # 2. Fallback: If no phone digits exist in this row text (e.g. it shows a profile name instead of a phone number)
+                                # but it's explicitly SMS, and not WhatsApp/Password, select it as a candidate.
+                                elif not digits_in_text or len(digits_in_text) < 2:
+                                    print("ℹ️ Row has no phone digits (may show user profile name). Evaluating as fallback SMS match...")
+                                    is_match = True
+                                    
+                                if is_match:
                                     # Check if the matched option is disabled or error flagged (e.g. "We can't send SMS right now")
                                     is_disabled_error = any(phrase in text.lower() for phrase in [
                                         "can't send sms", "can not send", "não podemos enviar", 
@@ -2260,7 +2274,13 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                         print("✅ Cooldown wait completed! Selecting SMS option...")
                     
                     try:
-                        matched_option_element.click(timeout=5000)
+                        # Find the radio button input or radio circle inside this row option to click explicitly
+                        radio_btn = matched_option_element.locator("input[type='radio'], [role='radio'], div[class*='circle'], div[class*='radio']").first
+                        if radio_btn.is_visible(timeout=500):
+                            print("🔘 Found radio element inside matched SMS option. Clicking it...")
+                            radio_btn.click(timeout=3000)
+                        else:
+                            matched_option_element.click(timeout=5000)
                     except Exception:
                         try:
                             matched_option_element.click(timeout=5000, force=True)
@@ -2271,7 +2291,7 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                     print(f"❌ No matching SMS option found ending with '{last_two}'.")
                     print("Leaving tab open and retrying with a new number...")
                     return "not_found", target
-                        
+                    
                 if found_match:
                     print("🔘 Clicking Submit...")
                     submit_success = False
