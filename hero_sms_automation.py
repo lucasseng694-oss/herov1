@@ -2049,21 +2049,12 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
             if is_choose_account_page:
                 print("\n👥 'Choose your account' page detected! Selecting a matching profile...")
                 
-                # Let's locate the clickable profile options.
                 profile_candidates = target.locator(
-                    "a[href*='identify'], a[href*='recover'], a[href*='search'], "
-                    "div[role='listitem'], div[role='button']:has(i), [role='list'] a, "
-                    "div._85el, div[class*='account-card'], div[class*='profile'], "
-                    "div[class*='card'] div[role='button']"
-                ).all()
-                
-                # If that didn't yield anything, find any clickable elements inside a list or cards
-                if not profile_candidates:
-                    profile_candidates = target.locator("div[role='list'] a, div[role='list'] div[role='button'], a[role='button']").all()
-                
-                # Absolute fallback: Find all interactive elements with a chevron or > icon, or any visible card
-                if not profile_candidates:
-                    profile_candidates = target.locator("a").all()
+                    "a, button, [role='button'], [role='link'], [role='listitem'], "
+                    "div[class*='card'], div[class*='item'], div[class*='row'], "
+                    "div[class*='profile'], div[class*='account'], [role='list'] > div, "
+                    "div._85el"
+                 ).all()
                 
                 # Filter down to visible elements that are likely profiles
                 valid_profiles = []
@@ -2073,18 +2064,21 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                             href = p_item.get_attribute("href") or ""
                             text = p_item.inner_text().strip()
                             
-                            # Language footer links usually have short text like "English", "Português", "Español"
-                            is_lang_link = any(lang in text for lang in ["English", "Português", "Español", "Français", "Italiano", "Deutsch", "More languages", "Idiomas"])
-                            is_back_btn = any(keyword in text.lower() for keyword in [
-                                "back", "voltar", "regresar", "not you", "não é você", "no eres tú",
-                                "search by", "procurar por", "buscar por", "find your", "create account", 
-                                "criar conta", "crear cuenta", "cancel", "cancelar", "try again", "tente de novo"
-                            ]) or text.strip() in ["<", ">", ""]
-                            
-                            if not is_lang_link and not is_back_btn and len(text) > 0:
-                                valid_profiles.append(p_item)
-                    except Exception:
-                        pass
+                             is_lang_link = any(lang in text for lang in ["English", "Português", "Español", "Français", "Italiano", "Deutsch", "More languages", "Idiomas"])
+                             is_back_btn = any(keyword in text.lower() for keyword in [
+                                 "back", "voltar", "regresar", "not you", "não é você", "no eres tú",
+                                 "search by", "procurar por", "buscar por", "find your", "create account", 
+                                 "criar conta", "crear cuenta", "cancel", "cancelar", "try again", "tente de novo",
+                                 "choose your account", "escolha a sua conta", "seleciona tu cuenta",
+                                 "confirm your account", "confirmar sua conta", "confirmar tu cuenta",
+                                 "sign up", "cadastre-se", "registrarse", "log in", "entrar", "iniciar sessão",
+                                 "sign in", "about", "sobre", "privacy", "privacidade", "terms", "termos", "cookies"
+                             ]) or text.strip() in ["<", ">", ""] or len(text) > 40
+                             
+                             if not is_lang_link and not is_back_btn and len(text) > 0:
+                                 valid_profiles.append(p_item)
+                     except Exception:
+                         pass
                 
                 if len(valid_profiles) >= 1:
                     print(f"🎯 Found {len(valid_profiles)} matching profile options. Clicking the first one: '{valid_profiles[0].inner_text().strip().replace(chr(10), ' ')}'...")
@@ -2195,7 +2189,28 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                     print("⚠️ Could not extract last 2 digits. Cannot proceed automatically.")
                     return "success", target
                     
-                print(f"🔍 Looking for an option ending in '{last_two}'...")
+                # Scan page options first to see if Facebook is using phone previews
+                page_has_phone_previews = False
+                for p_selector in ["label", "[role='radio']", "div[role='button']", "div.uiInputLabel", "div.row", "div"]:
+                    try:
+                        all_opts = target.locator(p_selector).all()
+                        for o_item in all_opts:
+                            try:
+                                opt_text = o_item.inner_text().strip()
+                                if "*" in opt_text or "+" in opt_text:
+                                    # Ensure it has digits to represent a phone preview
+                                    digits = [c for c in opt_text if c.isdigit()]
+                                    if len(digits) >= 3:
+                                        page_has_phone_previews = True
+                                        break
+                            except:
+                                pass
+                        if page_has_phone_previews:
+                            break
+                    except:
+                        pass
+                
+                print(f"🔍 Looking for an option ending in '{last_two}' (Page has phone previews: {page_has_phone_previews})...")
                 
                 found_match = False
                 matched_option_element = None
@@ -2233,16 +2248,17 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                                 if digits_in_text and digits_in_text.endswith(last_two):
                                     is_match = True
                                 # 2. Fallback: If no phone digits exist in this row text (e.g. it shows a profile name instead of a phone number)
-                                # but it's explicitly SMS, and not WhatsApp/Password, select it as a candidate.
-                                elif not digits_in_text or len(digits_in_text) < 2:
-                                    print("ℹ️ Row has no phone digits (may show user profile name). Evaluating as fallback SMS match...")
+                                # but it's explicitly SMS, and not WhatsApp/Password, select it as a candidate ONLY if the page is not displaying phone previews.
+                                elif not page_has_phone_previews and (not digits_in_text or len(digits_in_text) < 2):
+                                    print("ℹ️ Row has no phone digits and page is not displaying phone previews. Evaluating as fallback SMS match...")
                                     is_match = True
                                     
                                 if is_match:
                                     # Check if the matched option is disabled or error flagged (e.g. "We can't send SMS right now")
                                     is_disabled_error = any(phrase in text.lower() for phrase in [
                                         "can't send sms", "can not send", "não podemos enviar", 
-                                        "no podemos enviar", "impossible d'envoyer", "tentar novamente mais tarde"
+                                        "no podemos enviar", "impossible d'envoyer", "tentar novamente mais tarde",
+                                        "available again", "try again in", "disponível novamente", "disponible de nuevo"
                                     ])
                                     
                                     if is_disabled_error:
@@ -2287,6 +2303,26 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                         except Exception:
                             matched_option_element.evaluate("el => el.click()")
                     time.sleep(1)
+                    
+                    # Double-check that the option was selected successfully before proceeding
+                    selected = False
+                    try:
+                        radio_el = matched_option_element.locator("input[type='radio']").first
+                        if radio_el.is_visible(timeout=500):
+                            selected = radio_el.is_checked()
+                        else:
+                            aria_el = matched_option_element.locator("[role='radio']").first
+                            if aria_el.is_visible(timeout=500):
+                                selected = aria_el.get_attribute("aria-checked") == "true"
+                            else:
+                                # Fallback: assume selected if click succeeded
+                                selected = True
+                    except:
+                        selected = True  # Fallback to True if check throws
+                        
+                    if not selected:
+                        print("⚠️ SMS option radio selection could not be confirmed (it might be disabled/unclickable). Skipping submit...")
+                        return "not_found", target
                 else:
                     print(f"❌ No matching SMS option found ending with '{last_two}'.")
                     print("Leaving tab open and retrying with a new number...")
