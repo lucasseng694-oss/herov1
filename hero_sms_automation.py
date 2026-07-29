@@ -1482,6 +1482,20 @@ def handle_post_verification(context, target: Page) -> tuple[str, str]:
                         password_to_use = ''.join(random.choice(chars) for _ in range(16))
                         
                     print(f"Typing new password: {password_to_use}")
+                    
+                    # Instead of calling standard human_type which scrolls into view and clicks
+                    # (which trigger infinite scrolling behaviors if blocked by dialogs),
+                    # we focus first, click via coordinates, and write.
+                    try:
+                        password_input.focus()
+                        # If there is a backdrop blocking the element, a direct .click() might hang on scrolling.
+                        # We try to click it forcefully, or click the body background first to dismiss popups.
+                        target.mouse.click(10, 10) # Click top-left edge of page to dismiss floating web menus
+                        time.sleep(0.5)
+                        password_input.click(force=True, timeout=2000)
+                    except Exception:
+                        pass
+                        
                     human_type(password_input, password_to_use)
                     time.sleep(1)
                     
@@ -1734,8 +1748,19 @@ def extract_session_data(context, target: Page, phone_number: str, password_used
         output_data += f"{uid_padded} | {pass_padded} | {two_fa_padded} | {cookie_string}\n"
         output_data += "--------------------------------------------------------\n\n"
         
+        # Write to master file (for dashboard compatibility)
         with open(CONFIG.output_file, "a", encoding="utf-8") as f:
             f.write(output_data)
+            
+        # Write to daily segmented file
+        try:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            daily_output_file = f"recovered_accounts_{today_str}.txt"
+            with open(daily_output_file, "a", encoding="utf-8") as f_daily:
+                f_daily.write(output_data)
+            print(f"📁 Also saved to daily log: {daily_output_file}")
+        except Exception as daily_err:
+            print(f"⚠️ Could not save to daily log: {daily_err}")
             
         print(f"✅ Session data extracted and saved to {CONFIG.output_file}")
         if access_token != "Token not found":
