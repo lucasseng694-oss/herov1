@@ -632,7 +632,30 @@ def check_and_recover_server_error(page: Page) -> bool:
     return False
 
 
+def check_for_ban(page: Page) -> None:
+    """Detect if the Hero SMS account is banned/blocked, and shut down the automation gracefully if it is."""
+    try:
+        # 1. Extremely robust text content check on the body tag
+        body = page.locator("body")
+        if body.is_visible(timeout=500):
+            body_text = body.inner_text().lower()
+            if "your account is banned" in body_text or "account is banned" in body_text:
+                print("\n🚨 [CRITICAL ERROR] Hero SMS account ban detected via page text! Shutting down automation gracefully...")
+                raise KeyboardInterrupt("Hero SMS account is banned")
+
+        # 2. Backup element check matching the specific banner text
+        ban_locator = page.get_by_text(re.compile(r"Your account is banned|account is banned|account.*banned", re.I)).first
+        if ban_locator.is_visible(timeout=500):
+            print("\n🚨 [CRITICAL ERROR] Hero SMS account ban detected via alert element! Shutting down automation gracefully...")
+            raise KeyboardInterrupt("Hero SMS account is banned")
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        pass
+
+
 def navigate_to_purchases(page: Page) -> bool:
+    check_for_ban(page)
     close_cookies_if_needed(page)
     check_and_recover_server_error(page)
     if "purchases" in page.url.lower():
@@ -652,6 +675,7 @@ def navigate_to_purchases(page: Page) -> bool:
 
 
 def navigate_to_get_code(page: Page) -> bool:
+    check_for_ban(page)
     close_cookies_if_needed(page)
     check_and_recover_server_error(page)
     print("\n🔍 Ensuring the 'Get code' page is visible...")
@@ -664,7 +688,16 @@ def navigate_to_get_code(page: Page) -> bool:
             print("✅ Navigated to Get code page.")
             return True
     except Exception as e:
-        print(f"⚠️ Could not navigate to Get code: {e}")
+        print(f"⚠️ Could not navigate to Get code via click: {e}")
+
+    # Fallback to direct URL navigation if button was not visible/clickable
+    try:
+        print("🔗 Fallback: Navigating directly to https://hero-sms.com/...")
+        page.goto("https://hero-sms.com/", wait_until="domcontentloaded", timeout=15000)
+        time.sleep(2)
+        return True
+    except Exception as e_goto:
+        print(f"⚠️ Direct URL navigation fallback failed: {e_goto}")
     return False
 
 
@@ -717,6 +750,8 @@ class AutomationConfig:
     # Set True if you want the script to stop before buying so you can review.
     confirm_before_buy: bool = True
     vpn_connection_name: str = ""
+    min_price: float = 0.01
+    max_price: float = 0.15
 
 
 def load_config() -> AutomationConfig:
@@ -734,7 +769,9 @@ def load_config() -> AutomationConfig:
         "confirm_before_buy": True,
         "hero_username": "",
         "hero_password": "",
-        "vpn_connection_name": ""
+        "vpn_connection_name": "",
+        "min_price": 0.01,
+        "max_price": 0.15
     }
     
     if os.path.exists(config_path):
@@ -758,7 +795,9 @@ def load_config() -> AutomationConfig:
                 confirm_before_buy=merged.get("confirm_before_buy"),
                 hero_username=merged.get("hero_username", ""),
                 hero_password=merged.get("hero_password", ""),
-                vpn_connection_name=merged.get("vpn_connection_name", "")
+                vpn_connection_name=merged.get("vpn_connection_name", ""),
+                min_price=float(merged.get("min_price", 0.01)),
+                max_price=float(merged.get("max_price", 0.15))
             )
         except Exception as e:
             print(f"⚠️ Could not load config.json, using defaults: {e}")
@@ -1131,6 +1170,7 @@ def check_price_range(btn_element, min_price: float, max_price: float) -> tuple[
 
 
 def select_service_and_country(page: Page) -> bool:
+    check_for_ban(page)
     close_cookies_if_needed(page)
     check_and_recover_server_error(page)
     print("\n🤖 Ensuring service and country are selected...")
@@ -1139,7 +1179,7 @@ def select_service_and_country(page: Page) -> bool:
         buy_candidates = []
         if CONFIG.buy_text:
             buy_candidates.append(CONFIG.buy_text)
-        buy_candidates.extend(["Buy for $0.099", "Buy for $0.09", "Buy for", "Buy"])
+        buy_candidates.extend(["Buy for", "Buy"])
         
         buy_btn_visible = False
         for candidate in buy_candidates:
@@ -1195,6 +1235,28 @@ def select_service_and_country(page: Page) -> bool:
     try:
 
         print(f"Selecting service: {CONFIG.service_text}...")
+        # First type into the service search box if visible
+        try:
+            service_search = page.get_by_placeholder(re.compile("service|servicio", re.I)).first
+            if not service_search.is_visible(timeout=1000):
+                service_search = page.locator("input[placeholder*='Search by service' i], input[placeholder*='service' i], input[placeholder*='servicio' i]").first
+            
+            if service_search.is_visible(timeout=1500):
+                try:
+                    service_search.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+                try:
+                    service_search.click(timeout=1000, force=True)
+                except Exception:
+                    pass
+                service_search.fill("")
+                service_search.fill(CONFIG.service_text)
+                time.sleep(1.0)
+        except Exception as e_service_search:
+            print(f"⚠️ Service search input lookup skipped: {e_service_search}")
+
         service_btn = page.locator(f".service-card:has-text('{CONFIG.service_text}'), .v-card:has-text('{CONFIG.service_text}')").first
         if not service_btn.is_visible(timeout=1500):
             service_btn = page.get_by_text(re.compile(f"^{CONFIG.service_text}$", re.I)).first
@@ -2549,7 +2611,7 @@ def main() -> None:
             
             # Calculate price per number from config
             price_match = re.search(r'\$?([0-9]+\.[0-9]+)', CONFIG.buy_text)
-            price_per_sms = float(price_match.group(1)) if price_match else 0.099
+            price_per_sms = float(price_match.group(1)) if price_match else CONFIG.max_price
 
             print("\n" + "="*60)
             print("HERO SMS AUTOMATION - AUTOMATIC MODE")
@@ -2713,6 +2775,7 @@ def main() -> None:
 
                 attempt += 1
                 rotate_vpn_if_configured()
+                check_for_ban(hero)
                 print(f"\n{'='*60}")
                 print(f"Attempt {attempt}/{max_attempts}")
                 print(f"{'='*60}")
@@ -2812,7 +2875,10 @@ def main() -> None:
                     top_before = get_top_number(hero)
                     
                     # Navigate to Get code page
-                    navigate_to_get_code(hero)
+                    if not navigate_to_get_code(hero):
+                        print("🔴 Aborting this attempt because we could not navigate to Get code page.")
+                        time.sleep(3)
+                        continue
                     
                     # Ensure service and country are selected (in case of page refresh)
                     selection_success = select_service_and_country(hero)
@@ -2826,10 +2892,10 @@ def main() -> None:
                     configured_text = CONFIG.buy_text
                     if configured_text:
                         buy_candidates.append(configured_text)
-                    buy_candidates.extend(["Buy for $0.099", "Buy for $0.09", "Buy for", "Buy"])
+                    buy_candidates.extend(["Buy for", "Buy"])
                     
-                    min_price_config = getattr(CONFIG, 'min_price', 0.01)
-                    max_price_config = getattr(CONFIG, 'max_price', 0.15)
+                    min_price_config = CONFIG.min_price
+                    max_price_config = CONFIG.max_price
                     
                     print(f"\n🛒 Locating buy button candidates within range ${min_price_config:.3f} - ${max_price_config:.3f}: {buy_candidates}...")
                     # Give the page a tiny bit of time to settle before clicking buy, 
@@ -2838,6 +2904,7 @@ def main() -> None:
                     
                     purchase_success = False
                     for buy_attempt in range(1, 11):
+                        check_for_ban(hero)
                         buy_clicked = False
                         price_out_of_bounds = False
                         click_err = None
@@ -2985,6 +3052,7 @@ def main() -> None:
                             fail_toast = hero.get_by_text(re.compile("no number", re.I)).first
                             
                             for _ in range(10): # Check for up to 5 seconds
+                                check_for_ban(hero)
                                 if success_toast.is_visible():
                                     print("✅ Purchase confirmed by system popup!")
                                     purchase_success = True
@@ -2994,6 +3062,8 @@ def main() -> None:
                                     purchase_failed = True
                                     break
                                 time.sleep(0.5)
+                        except KeyboardInterrupt:
+                            raise
                         except Exception:
                             pass
                             
