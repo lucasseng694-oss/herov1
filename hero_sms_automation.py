@@ -753,6 +753,12 @@ class AutomationConfig:
     min_price: float = 0.01
     max_price: float = 0.15
 
+    # ClaudeOTP configuration settings
+    claudeotp_api_key: str = ""
+    claudeotp_service: str = "fb"
+    claudeotp_country: str = "6"
+    sms_provider: str = "hero-sms"
+
 
 def load_config() -> AutomationConfig:
     import json
@@ -771,7 +777,11 @@ def load_config() -> AutomationConfig:
         "hero_password": "",
         "vpn_connection_name": "",
         "min_price": 0.01,
-        "max_price": 0.15
+        "max_price": 0.15,
+        "claudeotp_api_key": "",
+        "claudeotp_service": "fb",
+        "claudeotp_country": "6",
+        "sms_provider": "hero-sms"
     }
     
     if os.path.exists(config_path):
@@ -797,7 +807,11 @@ def load_config() -> AutomationConfig:
                 hero_password=merged.get("hero_password", ""),
                 vpn_connection_name=merged.get("vpn_connection_name", ""),
                 min_price=float(merged.get("min_price", 0.01)),
-                max_price=float(merged.get("max_price", 0.15))
+                max_price=float(merged.get("max_price", 0.15)),
+                claudeotp_api_key=merged.get("claudeotp_api_key", ""),
+                claudeotp_service=merged.get("claudeotp_service", "fb"),
+                claudeotp_country=merged.get("claudeotp_country", "6"),
+                sms_provider=merged.get("sms_provider", "hero-sms")
             )
         except Exception as e:
             print(f"⚠️ Could not load config.json, using defaults: {e}")
@@ -806,6 +820,162 @@ def load_config() -> AutomationConfig:
 
 
 CONFIG = load_config()
+
+
+class ClaudeOTPAPI:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://claudeotp.com/api/v1"
+
+    def _request(self, path: str, method: str = "GET", data: dict = None) -> dict:
+        import urllib.request
+        import urllib.parse
+        import json
+
+        connector = "&" if "?" in path else "?"
+        url = f"{self.base_url}/{path}{connector}apikey={self.api_key}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
+        
+        payload = None
+        if data is not None:
+            payload = json.dumps(data).encode('utf-8')
+            headers["Content-Type"] = "application/json"
+        elif method == "POST":
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            payload = b""
+            
+        req = urllib.request.Request(url, data=payload, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode('utf-8') if he else ""
+            try:
+                err_json = json.loads(err_body)
+                msg = err_json.get("message") or err_body
+            except:
+                msg = err_body
+            raise RuntimeError(f"ClaudeOTP API request failed (HTTP {he.code}): {msg}")
+        except Exception as e:
+            raise RuntimeError(f"ClaudeOTP API connection error: {e}")
+
+    def get_balance(self) -> str:
+        res = self._request("profile")
+        if res.get("success"):
+            user_data = res.get("data", {}).get("user", {})
+            return user_data.get("balance", "0")
+        raise RuntimeError(f"Failed to retrieve balance from ClaudeOTP API: {res.get('message')}")
+
+    def get_number(self, service: str = "544", country: str = "ID") -> tuple[str, str]:
+        import json
+        
+        # Determine parent service ID (e.g. 544 for Facebook)
+        try:
+            service_id = int(service)
+        except ValueError:
+            if service == "fb":
+                service_id = 544
+            else:
+                raise RuntimeError(f"Invalid service: {service}. ClaudeOTP expects a numeric ID (e.g. 544 for Facebook).")
+
+        # Check if country is already a specific mapping ID
+        try:
+            specific_id = int(country)
+            res = self._request(f"orders?country={specific_id}&service_id={service_id}", method="POST")
+            if res.get("success"):
+                results = res.get("data", {}).get("results", [])
+                if results and results[0].get("success"):
+                    order = results[0].get("order", {})
+                    activation_id = str(order.get("id"))
+                    phone_number = str(order.get("number", {}).get("value"))
+                    return activation_id, phone_number
+                else:
+                    msg = results[0].get("message") if results else "Order creation failed"
+                    raise RuntimeError(msg)
+        except ValueError:
+            pass
+
+        # Fetch available countries and map operator items dynamically for country ISO code (e.g. "ID")
+        res_countries = self._request(f"services/{service_id}/countries")
+        if not res_countries.get("success"):
+            raise RuntimeError(f"Failed to fetch countries for service {service_id}: {res_countries.get('message')}")
+            
+        countries_list = res_countries.get("data", {}).get("countries", [])
+        matches = [c for c in countries_list if c.get("iso", "").upper() == country.upper()]
+        if not matches:
+            raise RuntimeError(f"No active carrier options found for country '{country}' on service {service_id}")
+
+        # Try to buy from cheapest available carrier option first
+        available_matches = [m for m in matches if m.get("available") and m.get("stock", 0) > 0]
+        if not available_matches:
+            available_matches = matches  # fallback to matches if stock counts are not initialized
+
+        sorted_matches = sorted(available_matches, key=lambda x: x.get("price", 999999))
+        errors = []
+        for match in sorted_matches:
+            mapping_id = match.get("id")
+            operator_name = match.get("operator", "unknown")
+            price_formatted = match.get("price_formatted", "0")
+            print(f"🛒 API purchasing from option: ID {mapping_id} ({operator_name}), Price: {price_formatted}")
+            
+            try:
+                res = self._request(f"orders?country={mapping_id}&service_id={service_id}", method="POST")
+                if res.get("success"):
+                    results = res.get("data", {}).get("results", [])
+                    if results and results[0].get("success"):
+                        order = results[0].get("order", {})
+                        activation_id = str(order.get("id"))
+                        phone_number = str(order.get("number", {}).get("value"))
+                        return activation_id, phone_number
+                    else:
+                        msg = results[0].get("message") if results else "Option failed"
+                        errors.append(f"Option ID {mapping_id}: {msg}")
+                else:
+                    errors.append(f"Option ID {mapping_id}: {res.get('message')}")
+            except Exception as ex:
+                errors.append(f"Option ID {mapping_id} error: {ex}")
+                
+        raise RuntimeError("All available carrier options failed: " + "; ".join(errors))
+
+    def get_status(self, activation_id: str) -> str | None:
+        res = self._request("orders/active")
+        if res.get("success"):
+            orders = res.get("data", {}).get("orders", [])
+            for order in orders:
+                if str(order.get("id")) == str(activation_id):
+                    sms_list = order.get("sms", [])
+                    if sms_list and isinstance(sms_list, list):
+                        return str(sms_list[0].get("code"))
+                    return None
+            return None
+        raise RuntimeError(f"Failed to check active orders status: {res.get('message')}")
+
+    def set_status(self, activation_id: str, status: int) -> str:
+        if status == 8:
+            try:
+                res = self._request(f"orders/{activation_id}", method="DELETE")
+                if res.get("success"):
+                    return "ACCESS_CANCEL"
+                raise RuntimeError(res.get('message'))
+            except Exception as ex:
+                msg = str(ex).lower()
+                if "tunggu" in msg or "menit" in msg or "wait" in msg or "3" in msg:
+                    print(f"⚠️ ClaudeOTP requires waiting 3 minutes to cancel. Skipping manual cancel to prevent blocking automation. The number will auto-expire and refund your credits automatically on ClaudeOTP after 20 minutes.")
+                    return "ACCESS_CANCEL"
+                else:
+                    raise RuntimeError(f"Failed to cancel order {activation_id}: {ex}")
+        elif status == 6:
+            try:
+                res = self._request(f"orders/{activation_id}/finish", method="POST")
+                if res.get("success"):
+                    return "ACCESS_ACTIVATION"
+                raise RuntimeError(res.get('message'))
+            except Exception as ex:
+                raise RuntimeError(f"Failed to finish order {activation_id}: {ex}")
+        return "ACCESS_READY"
 
 
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\s().-]{7,}\d)(?!\d)")
@@ -1139,8 +1309,6 @@ def human_click(element, timeout_ms=10000):
 
 def delete_failed_number(page: Page) -> None:
     """Delete the most recently purchased number (failed one) from the table."""
-    # Disabled per user request (number deletion skipped)
-    print("\n🗑️  Number deletion skipped (disabled per configuration)")
     pass
 
 
@@ -1369,18 +1537,18 @@ def wait_for_sms_code(page: Page, phone_number: str = None, fb_page: Page = None
         if fb_page:
             try:
                 captcha_iframe = fb_page.locator("iframe[src*='recaptcha'], iframe[title*='recaptcha'], iframe[src*='captcha'], .g-recaptcha").first
-                captcha_text = fb_page.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you", re.I)).first
+                captcha_text = fb_page.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you|Before we send the code", re.I)).first
                 if captcha_iframe.is_visible(timeout=500) or captcha_text.is_visible(timeout=500):
                     if session_stats is not None:
                         session_stats["captcha_triggers"] = session_stats.get("captcha_triggers", 0) + 1
                     print("\a\a\a") # Play console alert beeps
                     print("\n🚨🚨🚨 CAPTCHA DETECTED ON FACEBOOK TAB! 🚨🚨🚨")
-                    print("🛑 AUTOMATION PAUSED. Bringing Facebook tab to front. Please solve it manually...")
+                    print("🛑 AUTOMATION PAUSED. Bringing Facebook tab to front. Please solve it manually (timeout: 60s)...")
                     fb_page.bring_to_front()
                     if captcha_iframe.is_visible():
-                        captcha_iframe.wait_for(state="hidden", timeout=300_000)
+                        captcha_iframe.wait_for(state="hidden", timeout=60_000)
                     else:
-                        captcha_text.wait_for(state="hidden", timeout=300_000)
+                        captcha_text.wait_for(state="hidden", timeout=60_000)
                     print("✅ CAPTCHA solved! Returning to Hero SMS window to wait for SMS...")
                     
                     # Re-detect the correct active Hero SMS purchases tab if it changed during CAPTCHA pause
@@ -2075,16 +2243,16 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
         # 1. Check for CAPTCHA (Using iframes or text)
         try:
             captcha_iframe = target.locator("iframe[src*='recaptcha'], iframe[title*='recaptcha'], iframe[src*='captcha'], .g-recaptcha").first
-            captcha_text = target.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you", re.I)).first
+            captcha_text = target.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you|Before we send the code", re.I)).first
             if captcha_iframe.is_visible(timeout=500) or captcha_text.is_visible(timeout=500):
                 print("\a\a\a") # Play console alert beep
                 print("\n🚨🚨🚨 CAPTCHA DETECTED! 🚨🚨🚨")
                 print("🛑 AUTOMATION PAUSED. Please solve the CAPTCHA manually in the browser window.")
-                print("⏳ The script will automatically resume once the CAPTCHA popup is solved and disappears...")
+                print("⏳ The script will pause for 60 seconds for you to solve and disappear...")
                 if captcha_iframe.is_visible():
-                    captcha_iframe.wait_for(state="hidden", timeout=300_000)
+                    captcha_iframe.wait_for(state="hidden", timeout=60_000)
                 else:
-                    captcha_text.wait_for(state="hidden", timeout=300_000)
+                    captcha_text.wait_for(state="hidden", timeout=60_000)
                 print("✅ CAPTCHA solved! Resuming script...")
                 time.sleep(3)
         except Exception:
@@ -2104,8 +2272,9 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
             else:
                 # Fallback: if we see the back arrow and the input field is gone
                 input_visible = target.locator(CONFIG.target_phone_selector).first.is_visible(timeout=200)
-                # If there's no input field, but we are still on the identify/recover page:
-                if not input_visible and ("identify" in target.url.lower() or "recover" in target.url.lower()):
+                has_radios = target.locator("input[type='radio'], [role='radio']").count() > 0
+                # If there's no input field, no radio buttons (indicates options page), and we are still on the identify/recover page (NOT initiate or code page):
+                if not input_visible and not has_radios and ("identify" in target.url.lower() or "recover" in target.url.lower()) and not "initiate" in target.url.lower() and not "code" in target.url.lower():
                     is_choose_account_page = True
 
             if is_choose_account_page:
@@ -2134,7 +2303,8 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                                 "choose your account", "escolha a sua conta", "seleciona tu cuenta",
                                 "confirm your account", "confirmar sua conta", "confirmar tu cuenta",
                                 "sign up", "cadastre-se", "registrarse", "log in", "entrar", "iniciar sessão",
-                                "sign in", "about", "sobre", "privacy", "privacidade", "terms", "termos", "cookies"
+                                "sign in", "about", "sobre", "privacy", "privacidade", "terms", "termos", "cookies",
+                                "continue", "avançar", "continuar", "siguiente", "next", "weiter", "suivant", "continua", "avanti"
                             ]) or text.strip() in ["<", ">", ""] or len(text) > 40
                             
                             if not is_lang_link and not is_back_btn and len(text) > 0:
@@ -2484,12 +2654,31 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                             except:
                                 pass
                                 
+                            # 1.5. Check if a CAPTCHA appeared during transition
+                            try:
+                                captcha_iframe = target.locator("iframe[src*='recaptcha'], iframe[title*='recaptcha'], iframe[src*='captcha'], .g-recaptcha").first
+                                captcha_text = target.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you|Before we send the code", re.I)).first
+                                if captcha_iframe.is_visible(timeout=200) or captcha_text.is_visible(timeout=200):
+                                    print("\a\a\a") # Play console alert beeps
+                                    print("\n🚨🚨🚨 CAPTCHA DETECTED DURING TRANSITION! 🚨🚨🚨")
+                                    print("🛑 AUTOMATION PAUSED. Please solve the CAPTCHA manually in the browser window.")
+                                    print("⏳ The script will pause for 60 seconds for you to solve and disappear...")
+                                    if captcha_iframe.is_visible():
+                                        captcha_iframe.wait_for(state="hidden", timeout=60_000)
+                                    else:
+                                        captcha_text.wait_for(state="hidden", timeout=60_000)
+                                    print("✅ CAPTCHA solved! Resuming transition wait...")
+                                    # Reset transition wait start time since solving took time
+                                    start_wait = time.time()
+                            except Exception:
+                                pass
+                                
                             # 2. Check if the "We can't send SMS" toast/banner has appeared
                             try:
                                 sms_error_indicators = target.get_by_text(re.compile(
                                     r"We can't send SMS to this mobile number|Não podemos enviar um SMS para este número|No podemos enviar un SMS a este número|Não é possível enviar SMS para este número|No se puede enviar un SMS a este número", 
                                     re.I
-                                )).first
+                                 )).first
                                 if sms_error_indicators.is_visible(timeout=500):
                                     print("\n❌ Facebook error banner detected: 'We can't send SMS to this mobile number at the moment.'")
                                     return "not_found", target
@@ -2594,10 +2783,350 @@ def rotate_vpn_if_configured() -> None:
         print(f"⚠️ [VPN] Error rotating VPN: {e}")
 
 
+def run_api_mode(p) -> None:
+    claude_otp = ClaudeOTPAPI(CONFIG.claudeotp_api_key)
+    try:
+        balance = claude_otp.get_balance()
+        print(f"💰 Current ClaudeOTP Balance: {balance} USD / Credits")
+    except Exception as e:
+        print(f"❌ Failed to connect to ClaudeOTP API: {e}")
+        return
+
+    session_start_time = time.time()
+    accounts_recovered = 0
+    total_numbers_tried = 0
+    total_spent = 0.0
+    session_stats = {"captcha_triggers": 0}
+
+    fb_browser = None
+    fb_port = None
+    fb_page = None
+    fb_profile_name = None
+    fb_context = None
+
+    max_attempts = 20
+    attempt = 0
+    success = False
+    is_looping = getattr(CONFIG, 'multiple_accounts', False)
+
+    while (attempt < max_attempts or is_looping) and not success:
+        # Check stop flag
+        try:
+            check_stop_flag()
+        except KeyboardInterrupt:
+            print("\n🛑 Stop signal detected. Exiting API Mode...")
+            break
+
+        attempt += 1
+        rotate_vpn_if_configured()
+        print(f"\n{'='*60}")
+        print(f"Attempt {attempt}/{max_attempts} (ClaudeOTP API Mode)")
+        print(f"{'='*60}")
+
+        # 1. Proactively set up the Facebook Chrome profile & page first
+        if not is_placeholder_url(CONFIG.target_url):
+            try:
+                # Launch a separate browser for recovery using a fresh profile directory
+                if not fb_browser or not fb_browser.is_connected():
+                    fb_profile_name = generate_next_profile_name(force_new=True)
+                    import socket
+                    def get_free_port():
+                        p_check = 9223
+                        while True:
+                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                try:
+                                    s.bind(('127.0.0.1', p_check))
+                                    return p_check
+                                except OSError:
+                                    p_check += 1
+                    fb_port = get_free_port()
+                    
+                    print(f"\n🔄 Spawning separate fresh Chrome profile '{fb_profile_name}' on port {fb_port} for Facebook recovery...")
+                    fb_browser, fb_context, fb_is_standalone = launch_and_connect_chrome(p, fb_port, fb_profile_name, user_data_subdir="chrome_profiles_fb", is_guest=False, is_mobile=False)
+                else:
+                    print(f"\n🔄 Reusing running Chrome profile '{fb_profile_name}' for this attempt...")
+
+                fb_active_name = fb_profile_name
+                try:
+                    local_state_path = os.path.join(get_official_chrome_user_data_dir(), "Local State")
+                    if os.path.exists(local_state_path):
+                        with open(local_state_path, "r", encoding="utf-8") as f:
+                            state_data = json.load(f)
+                        h_name = state_data.get('profile', {}).get('info_cache', {}).get(fb_profile_name, {}).get('name')
+                        if h_name:
+                            fb_active_name = h_name
+                except:
+                    pass
+
+                # Open a temporary target page to verify if we are logged in or blocked
+                print("🔍 Verifying profile state before purchasing number...")
+                temp_page = fb_context.new_page()
+                temp_page.goto(CONFIG.target_url, wait_until="domcontentloaded")
+                
+                is_logged_in = False
+                try:
+                    fb_cookies = fb_context.cookies("https://www.facebook.com")
+                    if any(c['name'] == 'c_user' for c in fb_cookies):
+                        is_logged_in = True
+                except:
+                    pass
+                    
+                if is_logged_in:
+                    print(f"⚠️ Profile '{fb_profile_name}' already contains an active Facebook session!")
+                    try: temp_page.close()
+                    except: pass
+                    raise RuntimeError("Target profile is already logged in to Facebook. Skipping to preserve session.")
+                
+                try: temp_page.close()
+                except: pass
+            except Exception as setup_err:
+                print(f"\n❌ Error during Facebook profile verification: {setup_err}")
+                if fb_browser:
+                    try: fb_browser.close()
+                    except: pass
+                if fb_port:
+                    try: close_chrome_on_port(fb_port)
+                    except: pass
+                
+                fb_browser = None
+                fb_page = None
+                fb_context = None
+                fb_port = None
+                fb_profile_name = None
+                
+                print("🔄 Retrying with a new profile index in next attempt...")
+                time.sleep(2)
+                continue
+
+        # 2. Call API to get a number
+        print("\n📞 Requesting a new virtual number from ClaudeOTP...")
+        try:
+            activation_id, phone_number = claude_otp.get_number(CONFIG.claudeotp_service, CONFIG.claudeotp_country)
+            print(f"✅ Purchased number: {phone_number} (Activation ID: {activation_id})")
+        except Exception as purchase_err:
+            print(f"❌ Failed to purchase number via API: {purchase_err}")
+            print("⏳ Waiting 10 seconds before retrying...")
+            time.sleep(10)
+            continue
+
+        # Copy number to clipboard
+        pyperclip.copy(phone_number)
+        print(f"📋 Copied phone number to clipboard.")
+
+        # 3. Fill target page
+        if not is_placeholder_url(CONFIG.target_url):
+            total_numbers_tried += 1
+            
+            try:
+                # Retry the SAME phone number across fresh Chrome profiles if rate limited
+                max_profile_retries = 3
+                flagged_profiles = set()
+                result = "failed"
+                for profile_retry in range(max_profile_retries):
+                    # Ensure a valid Chrome profile is running
+                    if not fb_browser or not fb_browser.is_connected():
+                        fb_profile_name = generate_next_profile_name(exclude=flagged_profiles, force_new=True)
+                        fb_port = get_free_port()
+                        use_mobile_agent = (profile_retry > 0)
+                        print(f"\n🔄 Spawning fresh Chrome profile '{fb_profile_name}' on port {fb_port} (Mobile agent: {use_mobile_agent})...")
+                        fb_browser, fb_context, fb_is_standalone = launch_and_connect_chrome(p, fb_port, fb_profile_name, user_data_subdir="chrome_profiles_fb", is_guest=False, is_mobile=use_mobile_agent)
+                    
+                    print(f"\n📝 Filling target page with phone number {phone_number} (Attempt {profile_retry + 1}/{max_profile_retries})...")
+                    result, fb_page = fill_target_page(fb_context, phone_number)
+                    
+                    if result == "rate_limited":
+                        print(f"\n🛑 Facebook Rate-Limit Blocked profile '{fb_profile_name}'!")
+                        print(f"🧹 Deleting flagged profile directory '{fb_profile_name}' and spawning a NEW profile...")
+                        flagged_profiles.add(fb_profile_name)
+                        try: fb_page.close()
+                        except: pass
+                        try: fb_browser.close()
+                        except: pass
+                        if fb_port:
+                           close_chrome_on_port(fb_port)
+                        
+                        if fb_profile_name != "Guest":
+                            flagged_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profiles_fb", fb_profile_name)
+                            if os.path.exists(flagged_dir):
+                                try:
+                                    time.sleep(1)
+                                    shutil.rmtree(flagged_dir, ignore_errors=True)
+                                    print(f"🗑️ Cleaned flagged profile folder '{fb_profile_name}' from disk.")
+                                except Exception as del_err:
+                                    pass
+                        
+                        fb_browser = None
+                        fb_page = None
+                        fb_context = None
+                        fb_port = None
+                        fb_profile_name = None
+                        
+                        print("⏳ Waiting 10 seconds and rotating IP if configured...")
+                        time.sleep(10)
+                        rotate_vpn_if_configured()
+                        continue  # Retry with a new profile on the SAME number!
+                    else:
+                        break # Exit profile retry loop on success or not_found
+                
+                if result == "success" and fb_page:
+                    print("\n✅ SUCCESS! Account found and recovery in progress!")
+                    print("\n🔄 Marking phone number as ready in ClaudeOTP and waiting for SMS code...")
+                    
+                    # Mark number as ready (status 1)
+                    try:
+                        claude_otp.set_status(activation_id, 1)
+                    except Exception as ready_err:
+                        print(f"⚠️ Warning: could not set status to ready: {ready_err}")
+
+                    # Poll for SMS
+                    sms_code = None
+                    timeout_sec = 180
+                    poll_start = time.time()
+                    print(f"⏳ Waiting up to {timeout_sec} seconds for SMS code from ClaudeOTP...")
+                    while time.time() - poll_start < timeout_sec:
+                        try:
+                            check_stop_flag()
+                        except KeyboardInterrupt:
+                            print("\n🛑 Stop signal detected. Cancelling activation...")
+                            try: claude_otp.set_status(activation_id, 8)
+                            except: pass
+                            raise
+
+                        try:
+                            code = claude_otp.get_status(activation_id)
+                            if code:
+                                sms_code = code
+                                print(f"\n🔑 SMS Code Received: {sms_code}")
+                                break
+                        except Exception as poll_err:
+                            pass
+                        
+                        # Print a dot indicator
+                        sys.stdout.write(".")
+                        sys.stdout.flush()
+                        time.sleep(3)
+
+                    if sms_code:
+                        print("\n🔄 Entering code on Facebook...")
+                        submit_success = submit_facebook_code(fb_page, sms_code)
+                        if submit_success:
+                            print("\n🎉 CODE SUBMITTED SUCCESSFULLY! 🎉")
+                            pwd_status, password_used = handle_post_verification(fb_context, fb_page)
+                            if pwd_status in ["success", "2fa"]:
+                                # Complete activation (status 6)
+                                try:
+                                    claude_otp.set_status(activation_id, 6)
+                                except Exception as complete_err:
+                                    print(f"⚠️ Warning: could not complete activation status: {complete_err}")
+                                
+                                two_fa_str = "2FA" if pwd_status == "2fa" else ""
+                                extract_session_data(fb_context, fb_page, phone_number, password_used, fb_active_name, two_fa=two_fa_str)
+                                accounts_recovered += 1
+                                update_daily_stats(recovered=1)
+                                
+                                print("\n" + "="*60)
+                                if pwd_status == "2fa":
+                                    print(f"✅ SUCCESS (2FA)! Recovered Account #{accounts_recovered} in '{fb_active_name}'")
+                                else:
+                                    print(f"✅ SUCCESS! Recovered Account #{accounts_recovered} in '{fb_active_name}'")
+                                print("="*60)
+                                
+                                # Clean up Facebook page and browser cleanly
+                                try: fb_page.close()
+                                except: pass
+                                try: fb_browser.close()
+                                except: pass
+                                if fb_port:
+                                    close_chrome_on_port(fb_port)
+                                time.sleep(1.5)
+                                if fb_profile_name != "Guest":
+                                    sync_profile_to_official(fb_profile_name)
+                                
+                                # Reset profile context variables so the next run spawns a new profile
+                                fb_browser = None
+                                fb_page = None
+                                fb_context = None
+                                fb_port = None
+                                fb_profile_name = None
+                                
+                                if getattr(CONFIG, 'multiple_accounts', False):
+                                    continue
+                                else:
+                                    success = True
+                                    break
+                            else:
+                                print(f"\n❌ Post-verification failed (Status: {pwd_status}). Cancelling number...")
+                                update_daily_stats(failed_logins=1)
+                                try: claude_otp.set_status(activation_id, 8)
+                                except: pass
+                                time.sleep(2)
+                        else:
+                            print("\n❌ Failed to submit code on Facebook. Cancelling number...")
+                            update_daily_stats(failed_logins=1)
+                            try: claude_otp.set_status(activation_id, 8)
+                            except: pass
+                            time.sleep(2)
+                    else:
+                        print("\n❌ SMS verification timed out. Cancelling number...")
+                        try: claude_otp.set_status(activation_id, 8)
+                        except: pass
+                        time.sleep(2)
+                        
+                elif result == "rate_limited":
+                    print(f"\n🛑 Number {phone_number} reached max profile retries on rate limits. Cancelling number...")
+                    try: claude_otp.set_status(activation_id, 8)
+                    except: pass
+                    time.sleep(2)
+                elif result == "not_found":
+                    print("\n❌ No account found with this number. Cancelling number...")
+                    try: claude_otp.set_status(activation_id, 8)
+                    except: pass
+                    time.sleep(2)
+                else:
+                    print(f"\n❌ Failed to load target recovery form: {result}. Cancelling number...")
+                    try: claude_otp.set_status(activation_id, 8)
+                    except: pass
+                    time.sleep(2)
+            except Exception as setup_err:
+                print(f"\n❌ Error during Facebook recovery setup: {setup_err}")
+                try: claude_otp.set_status(activation_id, 8)
+                except: pass
+                if fb_page:
+                    try: fb_page.close()
+                    except: pass
+                if fb_browser:
+                    try: fb_browser.close()
+                    except: pass
+                if fb_port:
+                    try: close_chrome_on_port(fb_port)
+                    except: pass
+                fb_browser = None
+                fb_page = None
+                fb_context = None
+                fb_port = None
+                fb_profile_name = None
+                time.sleep(2)
+
+    # Final stats summary
+    print("\n" + "="*60)
+    print("SESSION SUMMARY (ClaudeOTP API Mode)")
+    print(f"Recovered accounts: {accounts_recovered}")
+    print(f"Total numbers tried: {total_numbers_tried}")
+    print(f"Total time elapsed: {int(time.time() - session_start_time)} seconds")
+    print("="*60)
+
+
 def main() -> None:
     session_start_time = time.time()
     try:
         with sync_playwright() as p:
+            # Check if ClaudeOTP API mode is enabled
+            is_claude = getattr(CONFIG, 'sms_provider', 'hero-sms') == 'claudeotp' or (not getattr(CONFIG, 'sms_provider', '') and getattr(CONFIG, 'claudeotp_api_key', ''))
+            if is_claude:
+                print("\n⚡ Running in ClaudeOTP API Mode...")
+                run_api_mode(p)
+                return
+
             profile_name = getattr(CONFIG, 'chrome_profile_name', "Default")
             active_port = 9222
             browser, context, is_standalone = launch_and_connect_chrome(p, active_port, profile_name, user_data_subdir="chrome_profiles_hero")
@@ -3261,39 +3790,32 @@ def main() -> None:
                                         else:
                                             print(f"\n❌ Post-verification failed (Status: {pwd_status}). Moving to next number...")
                                             update_daily_stats(failed_logins=1)
-                                            delete_failed_number(hero)
                                             time.sleep(2)
                                     else:
                                         print("\n❌ Failed to submit code on Facebook.")
                                         update_daily_stats(failed_logins=1)
-                                        delete_failed_number(hero)
                                         time.sleep(2)
                                 except ValueError as ve:
                                     if str(ve) == "sms_blocked_by_facebook":
                                         print("\n❌ Facebook is blocking SMS delivery to this number ('We can't send SMS to this mobile number').")
-                                        print("Deleting number and retrying with a new virtual number...")
-                                        delete_failed_number(hero)
+                                        print("Skipping number and retrying with a new virtual number...")
                                         time.sleep(2)
                                     else:
                                         raise ve
                                 except RuntimeError as e:
                                     print(f"\n❌ {e}")
-                                    delete_failed_number(hero)
                                     time.sleep(2)
                             elif result == "rate_limited":
-                                print(f"\n🛑 Number {phone_number} reached max profile retries on rate limits.")
-                                delete_failed_number(hero)
+                                print(f"\n🛑 Number {phone_number} reached max profile retries on rate limits. Skipping...")
                                 time.sleep(2)
                             elif result == "not_found":
                                 print("\n❌ No account found with this number.")
-                                print("Deleting this number and trying another...")
-                                delete_failed_number(hero)
+                                print("Skipping this number and trying another...")
                                 print("\n🔄 Looping to buy another number...")
                                 time.sleep(2)
                             else:
                                 print(f"\n❌ Failed to load target recovery form: {result}")
-                                print("Deleting this number and trying another...")
-                                delete_failed_number(hero)
+                                print("Skipping this number and trying another...")
                                 print("\n🔄 Looping to buy another number...")
                                 time.sleep(2)
                         except Exception as setup_err:
@@ -3314,14 +3836,7 @@ def main() -> None:
                             fb_context = None
                             fb_port = None
                             fb_profile_name = None
-                            
-                            # CRITICAL: Always delete the number we just bought so it doesn't stay active and waste money!
-                            print("🧹 Cleaning up: Deleting active purchased number to prevent wasted credits...")
-                            try:
-                                delete_failed_number(hero)
-                            except Exception as delete_err:
-                                print(f"⚠️ Error deleting failed number during cleanup: {delete_err}")
-                            time.sleep(2)
+
                             
                             # Log error and continue to the next loop iteration
                             print("🔄 Retrying setup in next attempt...")
@@ -3338,8 +3853,18 @@ def main() -> None:
             session_end_time = time.time()
             elapsed_seconds = int(session_end_time - session_start_time)
             # update_daily_stats(duration=elapsed_seconds) (Handled by app.py to prevent double-counting)
-            elapsed_mins = elapsed_seconds // 60
-            elapsed_secs_remainder = elapsed_seconds % 60
+            def format_seconds_to_duration(secs_val: int) -> str:
+                d = secs_val // 86400
+                h = (secs_val % 86400) // 3600
+                m = (secs_val % 3600) // 60
+                s = secs_val % 60
+                p = []
+                if d > 0: p.append(f"{d} day{'' if d == 1 else 's'}")
+                if h > 0: p.append(f"{h} hr{'' if h == 1 else 's'}")
+                if m > 0: p.append(f"{m} min{'' if m == 1 else 's'}")
+                if s > 0 or not p: p.append(f"{s} sec{'' if s == 1 else 's'}")
+                return ", ".join(p)
+            formatted_duration = format_seconds_to_duration(elapsed_seconds)
             
             if success or accounts_recovered > 0:
                 print("\n" + "="*60)
@@ -3349,7 +3874,7 @@ def main() -> None:
                 print("❌ PROCESS FAILED AFTER MAX ATTEMPTS")
                 
             print("="*60)
-            print(f"⏱️  Total Time Elapsed : {elapsed_mins} minutes, {elapsed_secs_remainder} seconds")
+            print(f"⏱️  Total Time Elapsed : {formatted_duration}")
             print(f"🎉 Total Accounts Recovered: {accounts_recovered}")
             print(f"📱 Total Numbers Tried     : {total_numbers_tried}")
             if total_numbers_tried > 0:
@@ -3366,12 +3891,22 @@ def main() -> None:
         try:
             session_end_time = time.time()
             elapsed_seconds = int(session_end_time - session_start_time)
-            elapsed_mins = elapsed_seconds // 60
-            elapsed_secs_remainder = elapsed_seconds % 60
+            def format_seconds_to_duration(secs_val: int) -> str:
+                d = secs_val // 86400
+                h = (secs_val % 86400) // 3600
+                m = (secs_val % 3600) // 60
+                s = secs_val % 60
+                p = []
+                if d > 0: p.append(f"{d} day{'' if d == 1 else 's'}")
+                if h > 0: p.append(f"{h} hr{'' if h == 1 else 's'}")
+                if m > 0: p.append(f"{m} min{'' if m == 1 else 's'}")
+                if s > 0 or not p: p.append(f"{s} sec{'' if s == 1 else 's'}")
+                return ", ".join(p)
+            formatted_duration = format_seconds_to_duration(elapsed_seconds)
             print("\n" + "="*60)
             print("⚠️ AUTOMATION PROCESS STOPPED BY USER")
             print("="*60)
-            print(f"⏱️  Total Time Elapsed : {elapsed_mins} minutes, {elapsed_secs_remainder} seconds")
+            print(f"⏱️  Total Time Elapsed : {formatted_duration}")
             print(f"🎉 Total Accounts Recovered: {accounts_recovered}")
             print(f"📱 Total Numbers Tried     : {total_numbers_tried}")
             if total_numbers_tried > 0:

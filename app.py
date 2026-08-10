@@ -39,7 +39,11 @@ DEFAULT_CONFIG = {
     "auto_login": False,
     "hero_username": "",
     "hero_password": "",
-    "vpn_connection_name": ""
+    "vpn_connection_name": "",
+    "claudeotp_api_key": "",
+    "claudeotp_service": 544,
+    "claudeotp_country": "ID",
+    "sms_provider": "hero-sms"
 }
 
 def load_config_data():
@@ -1260,6 +1264,39 @@ HTML_TEMPLATE = """
         #stats-grid::-webkit-scrollbar-thumb:hover {
             background: rgba(255, 255, 255, 0.2);
         }
+        /* Segmented Switch */
+        .segmented-switch {
+            display: flex;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 4px;
+            margin-bottom: 1.25rem;
+            position: relative;
+        }
+
+        .switch-option {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 2;
+        }
+
+        .switch-option:hover {
+            color: var(--text-main);
+        }
+
+        .switch-option.active {
+            color: #ffffff;
+            background: linear-gradient(135deg, var(--primary-glow), #4f46e5);
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+        }
     </style>
 </head>
 <body>
@@ -1309,30 +1346,84 @@ HTML_TEMPLATE = """
                 <input type="text" id="chrome_profile_name" placeholder="Profile 1">
             </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                <div class="input-group">
-                    <label>Target Service</label>
-                    <input type="text" id="service_text" placeholder="Facebook">
-                </div>
-                <div class="input-group">
-                    <label>Target Country</label>
-                    <input type="text" id="country_text" placeholder="Brazil">
-                </div>
-            </div>
-
             <div class="input-group">
-                <label>Buy Button Text / Price Selector</label>
-                <input type="text" id="buy_text" placeholder="Buy for $0.099">
+                <label>SMS Procurement Method</label>
+                <div class="segmented-switch">
+                    <div class="switch-option active" id="opt-hero" onclick="selectProvider('hero-sms')">HeroSMS (Browser)</div>
+                    <div class="switch-option" id="opt-claude" onclick="selectProvider('claudeotp')">ClaudeOTP (API)</div>
+                </div>
+                <input type="hidden" id="sms_provider" value="hero-sms">
             </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                <div class="input-group">
-                    <label>Min Price Acceptable (USD)</label>
-                    <input type="number" step="0.001" id="min_price" placeholder="0.01">
+            <!-- HeroSMS Specific Fields -->
+            <div id="hero-sms-only-fields" style="display: flex; flex-direction: column; gap: 0.75rem;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                    <div class="input-group">
+                        <label>Target Service</label>
+                        <input type="text" id="service_text" placeholder="Facebook">
+                    </div>
+                    <div class="input-group">
+                        <label>Target Country</label>
+                        <input type="text" id="country_text" placeholder="Brazil">
+                    </div>
                 </div>
+
                 <div class="input-group">
-                    <label>Max Price Acceptable (USD)</label>
-                    <input type="number" step="0.001" id="max_price" placeholder="0.15">
+                    <label>Buy Button Text / Price Selector</label>
+                    <input type="text" id="buy_text" placeholder="Buy for $0.099">
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                    <div class="input-group">
+                        <label>Min Price Acceptable (USD)</label>
+                        <input type="number" step="0.001" id="min_price" placeholder="0.01">
+                    </div>
+                    <div class="input-group">
+                        <label>Max Price Acceptable (USD)</label>
+                        <input type="number" step="0.001" id="max_price" placeholder="0.15">
+                    </div>
+                </div>
+
+                <div style="border: 1px dashed var(--border-color); padding: 1rem; border-radius: 8px; margin: 0.25rem 0; background: rgba(255,255,255,0.01);">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+                        <label class="checkbox-container" style="padding: 0;">
+                            <input type="checkbox" id="auto_login" onchange="toggleAutoLoginFields()">
+                            <span class="custom-checkbox"></span>
+                            Enable Hero SMS Auto-Login
+                        </label>
+                    </div>
+                    <div id="auto-login-fields" style="display: none; flex-direction: column; gap: 0.75rem;">
+                        <div class="input-group">
+                            <label style="font-size: 0.75rem;">Hero SMS Username / Email</label>
+                            <input type="text" id="hero_username" placeholder="your-email@example.com">
+                        </div>
+                        <div class="input-group">
+                            <label style="font-size: 0.75rem;">Hero SMS Password</label>
+                            <input type="password" id="hero_password" placeholder="••••••••">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ClaudeOTP Specific Fields -->
+            <div id="claudeotp-only-fields" style="display: none; flex-direction: column; gap: 0.75rem;">
+                <div style="border: 1px dashed var(--border-color); padding: 1rem; border-radius: 8px; margin: 0.25rem 0; background: rgba(255,255,255,0.01);">
+                    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                        <div class="input-group">
+                            <label style="font-size: 0.75rem;">ClaudeOTP API Key</label>
+                            <input type="text" id="claudeotp_api_key" placeholder="Enter API Key">
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                            <div class="input-group">
+                                <label style="font-size: 0.75rem;">Service ID</label>
+                                <input type="number" id="claudeotp_service" placeholder="544">
+                            </div>
+                            <div class="input-group">
+                                <label style="font-size: 0.75rem;">Country ISO Code</label>
+                                <input type="text" id="claudeotp_country" placeholder="ID">
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1349,26 +1440,6 @@ HTML_TEMPLATE = """
             <div class="input-group">
                 <label>Windows VPN Connection Name (e.g. Surfshark - leave empty to disable)</label>
                 <input type="text" id="vpn_connection_name" placeholder="Surfshark">
-            </div>
-
-            <div style="border: 1px dashed var(--border-color); padding: 1rem; border-radius: 8px; margin: 0.25rem 0; background: rgba(255,255,255,0.01);">
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
-                    <label class="checkbox-container" style="padding: 0;">
-                        <input type="checkbox" id="auto_login" onchange="toggleAutoLoginFields()">
-                        <span class="custom-checkbox"></span>
-                        Enable Hero SMS Auto-Login
-                    </label>
-                </div>
-                <div id="auto-login-fields" style="display: none; flex-direction: column; gap: 0.75rem;">
-                    <div class="input-group">
-                        <label style="font-size: 0.75rem;">Hero SMS Username / Email</label>
-                        <input type="text" id="hero_username" placeholder="your-email@example.com">
-                    </div>
-                    <div class="input-group">
-                        <label style="font-size: 0.75rem;">Hero SMS Password</label>
-                        <input type="password" id="hero_password" placeholder="••••••••">
-                    </div>
-                </div>
             </div>
 
             <div style="display: flex; flex-direction: column; gap: 0.75rem;">
@@ -1562,6 +1633,27 @@ HTML_TEMPLATE = """
             }
         }
 
+        function selectProvider(provider) {
+            document.getElementById('sms_provider').value = provider;
+            
+            const optHero = document.getElementById('opt-hero');
+            const optClaude = document.getElementById('opt-claude');
+            const heroFields = document.getElementById('hero-sms-only-fields');
+            const claudeFields = document.getElementById('claudeotp-only-fields');
+            
+            if (provider === 'claudeotp') {
+                optHero.classList.remove('active');
+                optClaude.classList.add('active');
+                heroFields.style.display = 'none';
+                claudeFields.style.display = 'flex';
+            } else {
+                optHero.classList.add('active');
+                optClaude.classList.remove('active');
+                heroFields.style.display = 'flex';
+                claudeFields.style.display = 'none';
+            }
+        }
+
         function loadConfig() {
             fetch('/api/config')
                 .then(res => res.json())
@@ -1583,6 +1675,13 @@ HTML_TEMPLATE = """
                     document.getElementById('hero_username').value = data.hero_username || '';
                     document.getElementById('hero_password').value = data.hero_password || '';
                     toggleAutoLoginFields();
+
+                    document.getElementById('claudeotp_api_key').value = data.claudeotp_api_key || '';
+                    document.getElementById('claudeotp_service').value = data.claudeotp_service || 544;
+                    document.getElementById('claudeotp_country').value = data.claudeotp_country || 'ID';
+                    
+                    const provider = data.sms_provider || (data.claudeotp_api_key ? 'claudeotp' : 'hero-sms');
+                    selectProvider(provider);
                 });
         }
 
@@ -1603,7 +1702,12 @@ HTML_TEMPLATE = """
                 
                 auto_login: document.getElementById('auto_login').checked,
                 hero_username: document.getElementById('hero_username').value,
-                hero_password: document.getElementById('hero_password').value
+                hero_password: document.getElementById('hero_password').value,
+
+                sms_provider: document.getElementById('sms_provider').value,
+                claudeotp_api_key: document.getElementById('claudeotp_api_key').value,
+                claudeotp_service: parseInt(document.getElementById('claudeotp_service').value) || 544,
+                claudeotp_country: document.getElementById('claudeotp_country').value || 'ID'
             };
 
             return fetch('/api/config', {
@@ -1696,13 +1800,15 @@ HTML_TEMPLATE = """
                         window.activeSessionRecovered = data.recovered || 0;
                         
                         // Format dynamic running session duration for summary modal
-                        const hours = Math.floor(window.activeElapsed / 3600);
+                        const days = Math.floor(window.activeElapsed / 86400);
+                        const hours = Math.floor((window.activeElapsed % 86400) / 3600);
                         const minutes = Math.floor((window.activeElapsed % 3600) / 60);
                         const seconds = window.activeElapsed % 60;
                         let parts = [];
-                        if (hours > 0) parts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
-                        if (minutes > 0 || hours > 0) parts.push(`${minutes} minute${minutes > 1 ? 's' : ''}`);
-                        parts.push(`${seconds} second${seconds > 1 ? 's' : ''}`);
+                        if (days > 0) parts.push(`${days} day${days > 1 ? 's' : ''}`);
+                        if (hours > 0) parts.push(`${hours} hr${hours > 1 ? 's' : ''}`);
+                        if (minutes > 0) parts.push(`${minutes} min${minutes > 1 ? 's' : ''}`);
+                        if (seconds > 0 || parts.length === 0) parts.push(`${seconds} sec${seconds > 1 ? 's' : ''}`);
                         sessionStats.duration = parts.join(', ');
                         
                         // Start log streaming if not active
