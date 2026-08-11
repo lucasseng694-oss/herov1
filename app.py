@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "hero_username": "",
     "hero_password": "",
     "vpn_connection_name": "",
+    "control_phone_number": "",
     "claudeotp_api_key": "",
     "claudeotp_service": 544,
     "claudeotp_country": "ID",
@@ -607,6 +608,30 @@ def api_accounts():
     return jsonify(parse_recovered_accounts())
 
 
+@app.route('/api/provider_stats', methods=['GET'])
+def api_provider_stats():
+    stats_file = os.path.join(BASE_DIR, "provider_stats.json")
+    data = {}
+    if os.path.exists(stats_file):
+        try:
+            with open(stats_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except:
+            pass
+    return jsonify(data)
+
+
+@app.route('/api/provider_stats/reset', methods=['POST'])
+def api_provider_stats_reset():
+    stats_file = os.path.join(BASE_DIR, "provider_stats.json")
+    try:
+        if os.path.exists(stats_file):
+            os.remove(stats_file)
+        return jsonify({"status": "success", "message": "Provider statistics reset."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/api/stats', methods=['GET'])
 def api_stats():
     recalculate_recovered_counts()
@@ -643,9 +668,21 @@ def api_clear_accounts():
     try:
         if os.path.exists(ACCOUNTS_PATH):
             os.remove(ACCOUNTS_PATH)
-        return jsonify({"status": "success", "message": "Accounts cleared."})
+        attempts_path = os.path.join(BASE_DIR, "phone_attempts_log.txt")
+        if os.path.exists(attempts_path):
+            try:
+                os.remove(attempts_path)
+            except:
+                pass
+        prov_stats_path = os.path.join(BASE_DIR, "provider_stats.json")
+        if os.path.exists(prov_stats_path):
+            try:
+                os.remove(prov_stats_path)
+            except:
+                pass
+        return jsonify({"status": "success", "message": "Accounts, attempts logs, and provider comparison stats cleared."})
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Failed to clear accounts: {e}"}), 500
+        return jsonify({"status": "error", "message": f"Failed to clear history: {e}"}), 500
 
 
 @app.route('/stream')
@@ -1442,6 +1479,11 @@ HTML_TEMPLATE = """
                 <input type="text" id="vpn_connection_name" placeholder="Surfshark">
             </div>
 
+            <div class="input-group">
+                <label>Control Phone Number (used to verify if Facebook is shadow-blocking the IP/session)</label>
+                <input type="text" id="control_phone_number" placeholder="628XXXXXXXXX">
+            </div>
+
             <div style="display: flex; flex-direction: column; gap: 0.75rem;">
                 <label class="checkbox-container">
                     <input type="checkbox" id="multiple_accounts">
@@ -1545,25 +1587,31 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-        <!-- Accounts table -->
+        <!-- Accounts & Attempts section -->
         <div class="bottom-section">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
-                <div class="panel-title" style="border: none; padding: 0; font-size: 1.4rem; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                    </svg>
-                    <span>Recovered Accounts</span>
-                    <span id="filter-badge" style="display: none; font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 20px; background: rgba(99, 102, 241, 0.15); border: 1px solid var(--primary-color); color: #818cf8; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 0.25rem;" onclick="clearDateFilter(event)">
-                        Filtered: <span id="filter-date-text"></span> 
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" style="margin-left: 0.15rem; display: inline-block;">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.25rem;">
+                <div style="display: flex; gap: 1rem;">
+                    <div id="tab-recovered" onclick="switchBottomTab('recovered')" style="font-size: 1.2rem; font-weight: 600; padding: 0.5rem 1rem; cursor: pointer; color: var(--primary-color); border-bottom: 3px solid var(--primary-color); transition: all 0.2s ease; display: flex; align-items: center; gap: 0.5rem;">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" style="width: 18px; height: 18px;">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                         </svg>
-                    </span>
+                        Recovered Accounts
+                        <span id="filter-badge" style="display: none; font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 20px; background: rgba(99, 102, 241, 0.15); border: 1px solid var(--primary-color); color: #818cf8; font-weight: 600; cursor: pointer; margin-left: 0.5rem;" onclick="clearDateFilter(event)">
+                            Filtered: <span id="filter-date-text"></span> ✕
+                        </span>
+                    </div>
+                    <div id="tab-comparison" onclick="switchBottomTab('comparison')" style="font-size: 1.2rem; font-weight: 500; padding: 0.5rem 1rem; cursor: pointer; color: var(--text-muted); border-bottom: 3px solid transparent; transition: all 0.2s ease; display: flex; align-items: center; gap: 0.5rem;">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" style="width: 18px; height: 18px;">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                        </svg>
+                        Provider Comparison
+                    </div>
                 </div>
                 <button class="btn btn-secondary" style="width: auto; font-size: 0.8rem; padding: 0.5rem 1rem;" onclick="clearAccounts()">Clear History</button>
             </div>
             
-            <div class="table-container">
+            <!-- Recovered Accounts Table -->
+            <div id="container-recovered" class="table-container">
                 <table>
                     <thead>
                         <tr>
@@ -1579,6 +1627,39 @@ HTML_TEMPLATE = """
                     <tbody id="accounts-tbody">
                         <tr>
                             <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">No recovered accounts found yet. Running automation successfully will add items here.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Provider Comparison Table -->
+            <div id="container-comparison" class="table-container" style="display: none;">
+                <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-bottom: 0.75rem; padding: 0.5rem 0.25rem; align-items: center;">
+                    <span style="font-size: 0.85rem; color: var(--text-muted); align-self: center; font-weight: 500;">Timeframe:</span>
+                    <select id="comparison-timeframe" onchange="renderComparison()" style="background: var(--bg-card); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 4px; padding: 0.35rem 0.65rem; font-size: 0.85rem; cursor: pointer; outline: none; transition: border-color 0.2s ease;">
+                        <option value="today" selected>Today</option>
+                        <option value="yesterday">Yesterday</option>
+                        <option value="all">All Time</option>
+                    </select>
+                    <button class="btn" onclick="resetComparisonStats()" style="height: 32px; padding: 0 0.75rem; font-size: 0.8rem; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #f87171; border-radius: 4px; cursor: pointer; transition: all 0.2s ease; display: inline-flex; align-items: center; justify-content: center; font-weight: 500;">
+                        Reset All Stats
+                    </button>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>SMS Provider</th>
+                            <th>Total Tried</th>
+                            <th>Success (Recovered)</th>
+                            <th>No Account Found</th>
+                            <th>No SMS Sent (Timeout)</th>
+                            <th>Rate Limited / Blocks</th>
+                            <th>Success Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody id="comparison-tbody">
+                        <tr>
+                            <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">No provider stats recorded yet. Running attempts will populate comparative stats.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -1670,6 +1751,7 @@ HTML_TEMPLATE = """
                     document.getElementById('multiple_accounts').checked = !!data.multiple_accounts;
                     document.getElementById('confirm_before_buy').checked = !!data.confirm_before_buy;
                     document.getElementById('vpn_connection_name').value = data.vpn_connection_name || '';
+                    document.getElementById('control_phone_number').value = data.control_phone_number || '';
                     
                     document.getElementById('auto_login').checked = !!data.auto_login;
                     document.getElementById('hero_username').value = data.hero_username || '';
@@ -1699,6 +1781,7 @@ HTML_TEMPLATE = """
                 multiple_accounts: document.getElementById('multiple_accounts').checked,
                 confirm_before_buy: document.getElementById('confirm_before_buy').checked,
                 vpn_connection_name: document.getElementById('vpn_connection_name').value,
+                control_phone_number: document.getElementById('control_phone_number').value,
                 
                 auto_login: document.getElementById('auto_login').checked,
                 hero_username: document.getElementById('hero_username').value,
@@ -1962,6 +2045,193 @@ HTML_TEMPLATE = """
 
         let selectedDateFilter = null;
         let accountsData = [];
+        let activeBottomTab = 'recovered';
+        let comparisonData = {};
+
+        function switchBottomTab(tabName) {
+            activeBottomTab = tabName;
+            const tabRec = document.getElementById('tab-recovered');
+            const tabComp = document.getElementById('tab-comparison');
+            const conRec = document.getElementById('container-recovered');
+            const conComp = document.getElementById('container-comparison');
+
+            if (tabName === 'recovered') {
+                tabRec.style.color = 'var(--primary-color)';
+                tabRec.style.borderBottom = '3px solid var(--primary-color)';
+                tabRec.style.fontWeight = '600';
+                
+                tabComp.style.color = 'var(--text-muted)';
+                tabComp.style.borderBottom = '3px solid transparent';
+                tabComp.style.fontWeight = '500';
+
+                conRec.style.display = 'block';
+                conComp.style.display = 'none';
+                loadAccounts();
+            } else {
+                tabComp.style.color = 'var(--primary-color)';
+                tabComp.style.borderBottom = '3px solid var(--primary-color)';
+                tabComp.style.fontWeight = '600';
+                
+                tabRec.style.color = 'var(--text-muted)';
+                tabRec.style.borderBottom = '3px solid transparent';
+                tabRec.style.fontWeight = '500';
+
+                conRec.style.display = 'none';
+                conComp.style.display = 'block';
+                loadComparison();
+            }
+        }
+
+        function loadComparison() {
+            fetch('/api/provider_stats')
+                .then(res => res.json())
+                .then(data => {
+                    comparisonData = data;
+                    renderComparison();
+                });
+        }
+
+        function resetComparisonStats() {
+            if (!confirm("Are you sure you want to permanently delete all accumulated provider stats?")) {
+                return;
+            }
+            fetch('/api/provider_stats/reset', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        comparisonData = {};
+                        renderComparison();
+                    } else {
+                        alert("Failed to reset stats: " + data.message);
+                    }
+                });
+        }
+
+        function renderComparison() {
+            const tbody = document.getElementById('comparison-tbody');
+            tbody.innerHTML = '';
+
+            const timeframe = document.getElementById('comparison-timeframe').value;
+            
+            // Calculate target dates
+            const todayStr = new Date().toISOString().split('T')[0];
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const yesterdayStr = yesterday.toISOString().split('T')[0];
+            
+            const aggregated = {};
+            const defaultStats = () => ({
+                total_tried: 0,
+                success: 0,
+                no_account_found: 0,
+                sms_timeout: 0,
+                rate_limited: 0
+            });
+            
+            // Initialize defaults for comparison layout consistency
+            aggregated['hero-sms'] = defaultStats();
+            aggregated['claudeotp'] = defaultStats();
+            
+            Object.keys(comparisonData).forEach(dateKey => {
+                // If legacy key (flat format direct provider string)
+                const isLegacy = dateKey === 'hero-sms' || dateKey === 'claudeotp' || dateKey === 'herosms';
+                
+                let include = false;
+                if (timeframe === 'all') {
+                    include = true;
+                } else if (timeframe === 'today' && (dateKey === todayStr || isLegacy)) {
+                    include = true;
+                } else if (timeframe === 'yesterday' && dateKey === yesterdayStr) {
+                    include = true;
+                }
+                
+                if (include) {
+                    if (isLegacy) {
+                        const targetKey = dateKey === 'herosms' ? 'hero-sms' : dateKey;
+                        const src = comparisonData[dateKey];
+                        const dest = aggregated[targetKey];
+                        if (src && dest) {
+                            Object.keys(dest).forEach(k => {
+                                dest[k] += src[k] || 0;
+                            });
+                        }
+                    } else {
+                        const dateObj = comparisonData[dateKey];
+                        if (dateObj) {
+                            Object.keys(dateObj).forEach(prov => {
+                                const targetKey = prov === 'herosms' ? 'hero-sms' : prov;
+                                const src = dateObj[prov];
+                                const dest = aggregated[targetKey] || (aggregated[targetKey] = defaultStats());
+                                if (src && dest) {
+                                    Object.keys(dest).forEach(k => {
+                                        dest[k] += src[k] || 0;
+                                    });
+                                }
+                            });
+                        }
+                    }
+                }
+            });
+
+            const providers = Object.keys(aggregated);
+            providers.forEach(prov => {
+                const item = aggregated[prov];
+                const tr = document.createElement('tr');
+
+                // Provider Name Label
+                const tdName = document.createElement('td');
+                tdName.style.fontWeight = '600';
+                tdName.style.fontSize = '0.95rem';
+                if (prov === 'herosms' || prov === 'hero-sms') {
+                    tdName.innerHTML = `<span style="color: #6366f1;">HeroSMS (Browser)</span>`;
+                } else if (prov === 'claudeotp') {
+                    tdName.innerHTML = `<span style="color: #10b981;">ClaudeOTP (API)</span>`;
+                } else {
+                    tdName.textContent = prov.toUpperCase();
+                }
+                tr.appendChild(tdName);
+
+                // Total Tried
+                const tdTried = document.createElement('td');
+                tdTried.textContent = item.total_tried || 0;
+                tdTried.style.fontWeight = '500';
+                tr.appendChild(tdTried);
+
+                // Success
+                const tdSuccess = document.createElement('td');
+                tdSuccess.textContent = item.success || 0;
+                tdSuccess.style.color = '#10b981';
+                tdSuccess.style.fontWeight = '600';
+                tr.appendChild(tdSuccess);
+
+                // No Account Found
+                const tdNoAcc = document.createElement('td');
+                tdNoAcc.textContent = item.no_account_found || 0;
+                tdNoAcc.style.color = 'var(--text-muted)';
+                tr.appendChild(tdNoAcc);
+
+                // No SMS Sent (Timeout)
+                const tdTimeout = document.createElement('td');
+                tdTimeout.textContent = item.sms_timeout || 0;
+                tdTimeout.style.color = '#f59e0b';
+                tr.appendChild(tdTimeout);
+
+                // Rate Limited / Blocks
+                const tdBlocked = document.createElement('td');
+                tdBlocked.textContent = item.rate_limited || 0;
+                tdBlocked.style.color = '#ef4444';
+                tr.appendChild(tdBlocked);
+
+                // Success Rate
+                const tdRate = document.createElement('td');
+                const total = item.total_tried || 0;
+                const rate = total > 0 ? ((item.success / total) * 100).toFixed(1) : '0.0';
+                tdRate.innerHTML = `<strong style="color: #818cf8;">${rate}%</strong>`;
+                tr.appendChild(tdRate);
+
+                tbody.appendChild(tr);
+            });
+        }
 
         function loadAccounts() {
             fetch('/api/accounts')
@@ -1970,6 +2240,7 @@ HTML_TEMPLATE = """
                     accountsData = data;
                     renderAccounts();
                 });
+            loadComparison();
         }
 
         function renderAccounts() {
