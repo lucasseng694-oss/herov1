@@ -560,8 +560,7 @@ def api_launch_chrome():
             "--no-first-run",
             "--skip-first-run-ui",
             "--no-default-browser-check",
-            "--disable-features=ProfilePicker",
-            "--disable-features=Translate",
+            "--disable-features=ProfilePicker,Translate,OptimizationGuideModelDownloading,OptimizationHints,OptimizationTargetPrediction,OptimizationGuide,OptimizationGuidePersonalizedHints",
             "--disable-blink-features=AutomationControlled"
         ]
         

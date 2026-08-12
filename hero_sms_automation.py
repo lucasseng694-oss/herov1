@@ -234,7 +234,23 @@ def is_profile_logged_in(profile_path: str) -> bool:
                 # If cookie file exists but reading it throws error (e.g. locked db), 
                 # assume it is logged in/unsafe to prevent session hijacking
                 return True
-    return False
+def delete_profile_folder(profile_name: str, subdir: str = "chrome_profiles_fb") -> None:
+    if not profile_name or "profile" not in profile_name.lower():
+        return
+    import shutil
+    import time
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    profile_path = os.path.join(base_dir, subdir, profile_name)
+    if os.path.exists(profile_path):
+        print(f"🧹 [Space Saving] Cleaning up unused profile folder: {profile_name}...")
+        # Give lock files a brief moment to release
+        for attempt in range(3):
+            try:
+                shutil.rmtree(profile_path)
+                print(f"✅ [Space Saving] Successfully deleted unused profile folder '{profile_name}'.")
+                break
+            except Exception as e:
+                time.sleep(1)
 
 
 def generate_next_profile_name(user_data_dir: str = None, exclude: set = None, force_new: bool = False) -> str:
@@ -382,8 +398,7 @@ def launch_and_connect_chrome(p, port: int, profile_name: str, user_data_subdir:
             "--no-first-run",
             "--skip-first-run-ui",
             "--no-default-browser-check",
-            "--disable-features=ProfilePicker",
-            "--disable-features=Translate",
+            "--disable-features=ProfilePicker,Translate,OptimizationGuideModelDownloading,OptimizationHints,OptimizationTargetPrediction,OptimizationGuide,OptimizationGuidePersonalizedHints",
             "--disable-notifications"
         ]
     else:
@@ -396,8 +411,7 @@ def launch_and_connect_chrome(p, port: int, profile_name: str, user_data_subdir:
             "--no-first-run",
             "--skip-first-run-ui",
             "--no-default-browser-check",
-            "--disable-features=ProfilePicker",
-            "--disable-features=Translate",
+            "--disable-features=ProfilePicker,Translate,OptimizationGuideModelDownloading,OptimizationHints,OptimizationTargetPrediction,OptimizationGuide,OptimizationGuidePersonalizedHints",
             "--disable-notifications",
             # Bypasses chromium headless flags and matches normal user-driven windows
             "--disable-blink-features=AutomationControlled"
@@ -3285,6 +3299,11 @@ def run_api_mode(p) -> None:
                 if fb_port:
                     try: close_chrome_on_port(fb_port)
                     except: pass
+                
+                # Delete unused profile directory on exception
+                if fb_profile_name and fb_profile_name != "Guest":
+                    delete_profile_folder(fb_profile_name, subdir="chrome_profiles_fb")
+                    
                 fb_browser = None
                 fb_page = None
                 fb_context = None
@@ -3303,6 +3322,11 @@ def run_api_mode(p) -> None:
                 if fb_port:
                     try: close_chrome_on_port(fb_port)
                     except: pass
+                
+                # Delete unused profile directory if not successful
+                if not success and fb_profile_name and fb_profile_name != "Guest":
+                    delete_profile_folder(fb_profile_name, subdir="chrome_profiles_fb")
+                    
                 fb_browser = None
                 fb_page = None
                 fb_context = None
@@ -4053,6 +4077,10 @@ def main() -> None:
                                 try: close_chrome_on_port(fb_port)
                                 except: pass
                             
+                            # Delete unused profile directory on exception
+                            if fb_profile_name and fb_profile_name != "Guest":
+                                delete_profile_folder(fb_profile_name, subdir="chrome_profiles_fb")
+                            
                             # Reset profile variables so a brand new profile is chosen on the next loop iteration
                             fb_browser = None
                             fb_page = None
@@ -4072,6 +4100,11 @@ def main() -> None:
                                 if fb_port:
                                     try: close_chrome_on_port(fb_port)
                                     except: pass
+                                
+                                # Delete unused profile directory
+                                if fb_profile_name and fb_profile_name != "Guest":
+                                    delete_profile_folder(fb_profile_name, subdir="chrome_profiles_fb")
+                                    
                                 fb_browser = None
                                 fb_page = None
                                 fb_context = None
