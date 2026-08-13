@@ -969,6 +969,18 @@ class ClaudeOTPAPI:
         # Check if country is already a specific mapping ID
         try:
             specific_id = int(country)
+            mapping_price = 0
+            try:
+                res_countries = self._request(f"services/{service_id}/countries")
+                if res_countries.get("success"):
+                    countries_list = res_countries.get("data", {}).get("countries", [])
+                    for c in countries_list:
+                        if str(c.get("id")) == str(specific_id):
+                            mapping_price = c.get("price", 0)
+                            break
+            except Exception:
+                pass
+
             res = self._request(f"orders?country={specific_id}&service_id={service_id}", method="POST")
             if res.get("success"):
                 results = res.get("data", {}).get("results", [])
@@ -976,7 +988,7 @@ class ClaudeOTPAPI:
                     order = results[0].get("order", {})
                     activation_id = str(order.get("id"))
                     phone_number = str(order.get("number", {}).get("value"))
-                    price = order.get("price", 0)
+                    price = order.get("price") or mapping_price
                     return activation_id, phone_number, price
                 else:
                     msg = results[0].get("message") if results else "Order creation failed"
@@ -1015,7 +1027,7 @@ class ClaudeOTPAPI:
                         order = results[0].get("order", {})
                         activation_id = str(order.get("id"))
                         phone_number = str(order.get("number", {}).get("value"))
-                        price = order.get("price", 0)
+                        price = order.get("price") or match.get("price", 0)
                         return activation_id, phone_number, price
                     else:
                         msg = results[0].get("message") if results else "Option failed"
@@ -2029,6 +2041,20 @@ def wait_for_login_complete(target: Page) -> bool:
         return True
 
 
+def get_structured_log_path() -> str:
+    import datetime
+    import os
+    now = datetime.datetime.now()
+    year = now.strftime("%Y")
+    month = now.strftime("%m-%B")  # e.g., "08-August"
+    day_file = now.strftime("%Y-%m-%d_%A.txt")  # e.g., "2026-08-13_Thursday.txt"
+    
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(base_dir, "recovered_logs", f"Year_{year}", f"Month_{month}")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, day_file)
+
+
 def extract_session_data(context, target: Page, phone_number: str, password_used: str, profile_name: str, two_fa: str = "") -> None:
     print("\n🍪 Extracting session cookies and tokens...")
     time.sleep(5) # Wait for login to complete
@@ -2069,13 +2095,13 @@ def extract_session_data(context, target: Page, phone_number: str, password_used
         with open(CONFIG.output_file, "a", encoding="utf-8") as f:
             f.write(output_data)
             
-        # Write to daily segmented file
+        # Write to daily segmented file inside calendar directories (Year > Month > Week > Day)
         try:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            daily_output_file = f"recovered_accounts_{today_str}.txt"
-            with open(daily_output_file, "a", encoding="utf-8") as f_daily:
+            structured_path = get_structured_log_path()
+            with open(structured_path, "a", encoding="utf-8") as f_daily:
                 f_daily.write(output_data)
-            print(f"📁 Also saved to daily log: {daily_output_file}")
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            print(f"📁 Also saved to daily log: {os.path.relpath(structured_path, base_dir)}")
         except Exception as daily_err:
             print(f"⚠️ Could not save to daily log: {daily_err}")
             
@@ -3164,13 +3190,6 @@ def run_api_mode(p) -> None:
                     poll_start = time.time()
                     print(f"⏳ Waiting up to {timeout_sec} seconds for SMS code from ClaudeOTP...")
                     while time.time() - poll_start < timeout_sec:
-                        try:
-                            check_stop_flag()
-                        except KeyboardInterrupt:
-                            print("\n🛑 Stop signal detected. Cancelling activation...")
-                            try: claude_otp.set_status(activation_id, 8)
-                            except: pass
-                            raise
 
                         try:
                             code = claude_otp.get_status(activation_id)
@@ -3187,6 +3206,9 @@ def run_api_mode(p) -> None:
                         time.sleep(3)
 
                     if sms_code:
+                        total_spent += current_number_price
+                        update_daily_stats(spent=current_number_price)
+                        
                         print("\n🔄 Entering code on Facebook...")
                         submit_success = submit_facebook_code(fb_page, sms_code)
                         if submit_success:
@@ -3202,8 +3224,7 @@ def run_api_mode(p) -> None:
                                 two_fa_str = "2FA" if pwd_status == "2fa" else ""
                                 extract_session_data(fb_context, fb_page, phone_number, password_used, fb_active_name, two_fa=two_fa_str)
                                 accounts_recovered += 1
-                                total_spent += current_number_price
-                                update_daily_stats(recovered=1, spent=current_number_price)
+                                update_daily_stats(recovered=1)
                                 log_phone_attempt(phone_number, "success", f"Account recovered successfully (profile: {fb_active_name}, two_fa: {two_fa_str})")
                                 consecutive_not_found = 0
                                 

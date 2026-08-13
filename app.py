@@ -15,6 +15,7 @@ log_queue = queue.Queue(maxsize=5000)
 process = None
 thread = None
 is_running = False
+stop_requested = False
 session_start_time = None
 session_stop_requested_time = None
 
@@ -292,8 +293,9 @@ def run_automation_process():
             is_success = (end_accounts_count > start_accounts_count)
             update_duration_in_stats(session_start_time, end_time, is_success)
             session_start_time = None
-        session_stop_requested_time = None
+            session_stop_requested_time = None
         is_running = False
+        stop_requested = False
         process = None
 
 
@@ -331,6 +333,7 @@ def api_status():
             pass
     return jsonify({
         "is_running": is_running,
+        "stop_requested": stop_requested,
         "elapsed": elapsed,
         "start_time": start_time_val,
         "recovered": recovered_in_session
@@ -357,49 +360,41 @@ def api_start():
 
 @app.route('/api/stop', methods=['POST'])
 def api_stop():
-    global process, is_running, session_stop_requested_time, thread
+    global process, is_running, session_stop_requested_time, thread, stop_requested
     if not is_running or not process:
         return jsonify({"status": "error", "message": "Automation is not running."}), 400
         
     try:
-        # Freeze elapsed time at the exact moment the user requests a stop
+        flag_path = os.path.join(BASE_DIR, "stop.flag")
+        
+        # If stop was already requested, this is a second click -> Force Kill!
+        if stop_requested:
+            log_queue.put("[SYSTEM] Force terminate request received. Killing subprocess immediately...\n")
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+            except:
+                pass
+            if thread and thread.is_alive():
+                thread.join(timeout=2)
+            stop_requested = False
+            is_running = False
+            process = None
+            if os.path.exists(flag_path):
+                try: os.remove(flag_path)
+                except: pass
+            return jsonify({"status": "success", "message": "Automation force terminated."})
+            
+        # First click -> Graceful stop!
         session_stop_requested_time = time.time()
+        stop_requested = True
         
         # Write stop.flag to trigger a graceful shutdown
-        flag_path = os.path.join(BASE_DIR, "stop.flag")
         with open(flag_path, "w", encoding="utf-8") as f:
             f.write("stop")
             
-        log_queue.put("[SYSTEM] Stop request sent. Waiting for graceful shutdown...\n")
+        log_queue.put("[SYSTEM] Stop request received. Waiting for current phone attempt to finish before stopping. (Click 'Stop' again to Force Kill immediately)\n")
         
-        # Wait up to 5 seconds for it to exit gracefully
-        start_wait = time.time()
-        graceful_exit = False
-        while time.time() - start_wait < 5:
-            if process.poll() is not None:
-                graceful_exit = True
-                break
-            time.sleep(0.5)
-            
-        if not graceful_exit:
-            # Force kill if it doesn't shut down in 5 seconds
-            log_queue.put("[SYSTEM] Process did not exit within 5s. Force terminating...\n")
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
-            
-        # Wait for the thread to exit cleanly and commit stats to the JSON database
-        if thread and thread.is_alive():
-            thread.join(timeout=3)
-            
-        # Clean up stop.flag if it still exists
-        if os.path.exists(flag_path):
-            try:
-                os.remove(flag_path)
-            except:
-                pass
-                
-        is_running = False
-        process = None
-        return jsonify({"status": "success", "message": "Automation stopped."})
+        return jsonify({"status": "success", "message": "Graceful stop requested. Waiting for current attempt to finish."})
     except Exception as e:
         return jsonify({"status": "error", "message": f"Failed to stop automation: {e}"}), 500
 
@@ -715,6 +710,7 @@ HTML_TEMPLATE = """
             --primary-glow-hover: #4f46e5;
             --success-color: #10b981;
             --danger-color: #ef4444;
+            --warning-color: #f59e0b;
             --text-main: #f3f4f6;
             --text-muted: #9ca3af;
             --font-main: 'Outfit', sans-serif;
@@ -813,6 +809,22 @@ HTML_TEMPLATE = """
             animation: pulse 1.5s infinite;
         }
 
+        .status-dot.stopping {
+            background-color: var(--warning-color);
+            box-shadow: 0 0 12px var(--warning-color);
+            animation: pulse 1s infinite;
+        }
+
+        .btn-pulse {
+            animation: btnPulse 1.5s infinite;
+        }
+
+        @keyframes btnPulse {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+
         @keyframes pulse {
             0% { transform: scale(0.9); opacity: 0.8; }
             50% { transform: scale(1.1); opacity: 1; }
@@ -884,6 +896,15 @@ HTML_TEMPLATE = """
             transition: all 0.25s ease;
             outline: none;
             width: 100%;
+        }
+
+        select option {
+            background-color: #1a1e2e;
+            color: #f8fafc;
+        }
+
+        .password-toggle-btn:hover {
+            color: var(--text-main) !important;
         }
 
         /* Remove number input spin arrows for cleaner aesthetics */
@@ -1465,7 +1486,15 @@ HTML_TEMPLATE = """
 
             <div class="input-group">
                 <label>New Account Password</label>
-                <input type="password" id="new_password" placeholder="HeroSmsRecover123!">
+                <div style="position: relative; display: flex; align-items: center; width: 100%;">
+                    <input type="password" id="new_password" placeholder="HeroSmsRecover123!" style="padding-right: 2.75rem;">
+                    <button type="button" onclick="togglePasswordVisibility()" class="password-toggle-btn" style="position: absolute; right: 0.75rem; background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; justify-content: center; outline: none; padding: 0.25rem; transition: color 0.2s ease;">
+                        <svg id="password-toggle-eye" xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                    </button>
+                </div>
             </div>
 
             <div class="input-group">
@@ -1872,10 +1901,29 @@ HTML_TEMPLATE = """
                     const stopBtn = document.getElementById('stop-btn');
                     
                     if (data.is_running) {
-                        statusDot.className = 'status-dot running';
-                        statusText.textContent = 'Running';
-                        startBtn.disabled = true;
-                        stopBtn.disabled = false;
+                        if (data.stop_requested) {
+                            statusDot.className = 'status-dot stopping';
+                            statusText.textContent = 'Stopping...';
+                            startBtn.disabled = true;
+                            stopBtn.disabled = false;
+                            stopBtn.className = 'btn btn-danger btn-pulse';
+                            stopBtn.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                    <path d="M5 3.5h6A1.5 1.5 0 0 1 12.5 5v6a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 11V5A1.5 1.5 0 0 1 5 3.5z"/>
+                                </svg> Force Stop
+                            `;
+                        } else {
+                            statusDot.className = 'status-dot running';
+                            statusText.textContent = 'Running';
+                            startBtn.disabled = true;
+                            stopBtn.disabled = false;
+                            stopBtn.className = 'btn btn-danger';
+                            stopBtn.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                    <path d="M5 3.5h6A1.5 1.5 0 0 1 12.5 5v6a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 11V5A1.5 1.5 0 0 1 5 3.5z"/>
+                                </svg> Stop Automation
+                            `;
+                        }
                         
                         window.activeElapsed = data.elapsed || 0;
                         window.activeStartTime = data.start_time || null;
@@ -1911,6 +1959,12 @@ HTML_TEMPLATE = """
                         statusText.textContent = 'Idle';
                         startBtn.disabled = false;
                         stopBtn.disabled = true;
+                        stopBtn.className = 'btn btn-danger';
+                        stopBtn.innerHTML = `
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M5 3.5h6A1.5 1.5 0 0 1 12.5 5v6a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 11V5A1.5 1.5 0 0 1 5 3.5z"/>
+                            </svg> Stop Automation
+                        `;
                         
                         window.activeElapsed = 0;
                         window.activeStartTime = null;
@@ -1928,6 +1982,23 @@ HTML_TEMPLATE = """
                         }
                     }
                 });
+        }
+
+        function togglePasswordVisibility() {
+            const pwdInput = document.getElementById('new_password');
+            const eyeSvg = document.getElementById('password-toggle-eye');
+            if (pwdInput.type === 'password') {
+                pwdInput.type = 'text';
+                eyeSvg.innerHTML = `
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.822 7.822L21 21m-2.228-2.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                `;
+            } else {
+                pwdInput.type = 'password';
+                eyeSvg.innerHTML = `
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                `;
+            }
         }
 
         function startAutomation() {
@@ -2112,11 +2183,12 @@ HTML_TEMPLATE = """
 
             const timeframe = document.getElementById('comparison-timeframe').value;
             
-            // Calculate target dates
-            const todayStr = new Date().toISOString().split('T')[0];
-            const yesterday = new Date();
-            yesterday.setDate(yesterday.getDate() - 1);
-            const yesterdayStr = yesterday.toISOString().split('T')[0];
+            // Calculate target dates in local timezone to align with backend Python's date logic
+            const d = new Date();
+            const todayStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            const y = new Date();
+            y.setDate(y.getDate() - 1);
+            const yesterdayStr = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, '0')}-${String(y.getDate()).padStart(2, '0')}`;
             
             const aggregated = {};
             const defaultStats = () => ({
