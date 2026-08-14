@@ -123,27 +123,40 @@ def update_provider_stats(provider: str, outcome: str) -> None:
         "success": 0,
         "no_account_found": 0,
         "sms_timeout": 0,
-        "rate_limited": 0
+        "rate_limited": 0,
+        "captcha": 0
     })
     
     outcome = outcome.lower()
-    p_data["total_tried"] += 1
-    if outcome == "success":
-        p_data["success"] += 1
-    elif outcome == "no_account_found":
-        p_data["no_account_found"] += 1
-    elif outcome in ["sms_timeout", "sms_blocked"]:
-        p_data["sms_timeout"] += 1
-    elif outcome in ["rate_limited", "load_error"]:
-        p_data["rate_limited"] += 1
+    if outcome == "captcha":
+        p_data.setdefault("captcha", 0)
+        p_data["captcha"] += 1
     else:
-        p_data["sms_timeout"] += 1
+        p_data["total_tried"] += 1
+        if outcome == "success":
+            p_data["success"] += 1
+        elif outcome == "no_account_found":
+            p_data["no_account_found"] += 1
+        elif outcome in ["sms_timeout", "sms_blocked"]:
+            p_data["sms_timeout"] += 1
+        elif outcome in ["rate_limited", "load_error"]:
+            p_data["rate_limited"] += 1
+        else:
+            p_data["sms_timeout"] += 1
         
     try:
         with open(stats_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
     except Exception as e:
         print(f"Error writing provider_stats.json: {e}")
+
+def record_captcha_encounter() -> None:
+    provider = "herosms"
+    try:
+        provider = getattr(CONFIG, 'sms_provider', 'herosms')
+    except:
+        pass
+    update_provider_stats(provider, "captcha")
 
 def log_phone_attempt(phone_number: str, result_status: str, details: str = "") -> None:
     import datetime
@@ -1640,6 +1653,7 @@ def wait_for_sms_code(page: Page, phone_number: str = None, fb_page: Page = None
                 if captcha_iframe.is_visible(timeout=500) or captcha_text.is_visible(timeout=500):
                     if session_stats is not None:
                         session_stats["captcha_triggers"] = session_stats.get("captcha_triggers", 0) + 1
+                    record_captcha_encounter()
                     print("\a\a\a") # Play console alert beeps
                     print("\n🚨🚨🚨 CAPTCHA DETECTED ON FACEBOOK TAB! 🚨🚨🚨")
                     print("🛑 AUTOMATION PAUSED. Bringing Facebook tab to front. Please solve it manually (timeout: 60s)...")
@@ -2355,10 +2369,13 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
     max_waits = 15
     for i in range(max_waits):
         # 1. Check for CAPTCHA (Using iframes or text)
+        captcha_detected_now = False
         try:
             captcha_iframe = target.locator("iframe[src*='recaptcha'], iframe[title*='recaptcha'], iframe[src*='captcha'], .g-recaptcha").first
             captcha_text = target.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you|Before we send the code", re.I)).first
             if captcha_iframe.is_visible(timeout=500) or captcha_text.is_visible(timeout=500):
+                captcha_detected_now = True
+                record_captcha_encounter()
                 print("\a\a\a") # Play console alert beep
                 print("\n🚨🚨🚨 CAPTCHA DETECTED! 🚨🚨🚨")
                 print("🛑 AUTOMATION PAUSED. Please solve the CAPTCHA manually in the browser window.")
@@ -2370,10 +2387,23 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                 print("✅ CAPTCHA solved! Resuming script...")
                 time.sleep(3)
         except Exception:
-            pass
+            if captcha_detected_now:
+                print("⏳ CAPTCHA is still visible (timeout reached). Pausing again...")
+                time.sleep(5)
+                continue
 
         # 1b. Check for "Choose your account" multiple accounts list screen (Language-Agnostic)
         try:
+            # Verify if CAPTCHA is visible right now - if so, do NOT treat as choose account page
+            captcha_visible = False
+            try:
+                c_iframe = target.locator("iframe[src*='recaptcha'], iframe[title*='recaptcha'], iframe[src*='captcha'], .g-recaptcha").first
+                c_text = target.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you|Before we send the code", re.I)).first
+                if c_iframe.is_visible(timeout=100) or c_text.is_visible(timeout=100):
+                    captcha_visible = True
+            except:
+                pass
+
             # Check for the header text "Choose your account" (case-insensitive, multi-language)
             choose_account_heading = target.get_by_text(re.compile(
                 r"Choose your account|Elige tu cuenta|Escolha (a )?sua conta|Choisissez votre compte|Scegli il tuo account|Wähle dein Konto|Wähle dein Profil|match the email or mobile number|perfis do Facebook correspondem", 
@@ -2381,15 +2411,16 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
             )).first
             
             is_choose_account_page = False
-            if choose_account_heading.is_visible(timeout=500):
-                is_choose_account_page = True
-            else:
-                # Fallback: if we see the back arrow and the input field is gone
-                input_visible = target.locator(CONFIG.target_phone_selector).first.is_visible(timeout=200)
-                has_radios = target.locator("input[type='radio'], [role='radio']").count() > 0
-                # If there's no input field, no radio buttons (indicates options page), and we are still on the identify/recover page (NOT initiate or code page):
-                if not input_visible and not has_radios and ("identify" in target.url.lower() or "recover" in target.url.lower()) and not "initiate" in target.url.lower() and not "code" in target.url.lower():
+            if not captcha_visible:
+                if choose_account_heading.is_visible(timeout=500):
                     is_choose_account_page = True
+                else:
+                    # Fallback: if we see the back arrow and the input field is gone
+                    input_visible = target.locator(CONFIG.target_phone_selector).first.is_visible(timeout=200)
+                    has_radios = target.locator("input[type='radio'], [role='radio']").count() > 0
+                    # If there's no input field, no radio buttons (indicates options page), and we are still on the identify/recover page (NOT initiate or code page):
+                    if not input_visible and not has_radios and ("identify" in target.url.lower() or "recover" in target.url.lower()) and not "initiate" in target.url.lower() and not "code" in target.url.lower():
+                        is_choose_account_page = True
 
             if is_choose_account_page:
                 print("\n👥 'Choose your account' page detected! Selecting a matching profile...")
@@ -2783,6 +2814,7 @@ def fill_target_page(context, phone_number: str) -> tuple[str, Page | None]:
                                 captcha_iframe = target.locator("iframe[src*='recaptcha'], iframe[title*='recaptcha'], iframe[src*='captcha'], .g-recaptcha").first
                                 captcha_text = target.get_by_text(re.compile("Help us confirm|Confirm it's you|Confirm that it's you|Before we send the code", re.I)).first
                                 if captcha_iframe.is_visible(timeout=200) or captcha_text.is_visible(timeout=200):
+                                    record_captcha_encounter()
                                     print("\a\a\a") # Play console alert beeps
                                     print("\n🚨🚨🚨 CAPTCHA DETECTED DURING TRANSITION! 🚨🚨🚨")
                                     print("🛑 AUTOMATION PAUSED. Please solve the CAPTCHA manually in the browser window.")

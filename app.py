@@ -1682,12 +1682,13 @@ HTML_TEMPLATE = """
                             <th>No Account Found</th>
                             <th>No SMS Sent (Timeout)</th>
                             <th>Rate Limited / Blocks</th>
+                            <th>Captcha Encountered</th>
                             <th>Success Rate</th>
                         </tr>
                     </thead>
                     <tbody id="comparison-tbody">
                         <tr>
-                            <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">No provider stats recorded yet. Running attempts will populate comparative stats.</td>
+                            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">No provider stats recorded yet. Running attempts will populate comparative stats.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -2196,7 +2197,8 @@ HTML_TEMPLATE = """
                 success: 0,
                 no_account_found: 0,
                 sms_timeout: 0,
-                rate_limited: 0
+                rate_limited: 0,
+                captcha: 0
             });
             
             // Initialize defaults for comparison layout consistency
@@ -2292,6 +2294,13 @@ HTML_TEMPLATE = """
                 tdBlocked.textContent = item.rate_limited || 0;
                 tdBlocked.style.color = '#ef4444';
                 tr.appendChild(tdBlocked);
+
+                // Captcha Encountered
+                const tdCaptcha = document.createElement('td');
+                tdCaptcha.textContent = item.captcha || 0;
+                tdCaptcha.style.color = '#c084fc';
+                tdCaptcha.style.fontWeight = '500';
+                tr.appendChild(tdCaptcha);
 
                 // Success Rate
                 const tdRate = document.createElement('td');
